@@ -14,6 +14,13 @@ bashio::log.info "Log level  : ${LOG_LEVEL}"
 CONFIG_FILE="/data/config.yaml"
 bashio::log.info "Writing ${CONFIG_FILE} from add-on options"
 
+yaml_double_quote() {
+    local value="${1:-}"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    printf '"%s"' "${value}"
+}
+
 printf 'directories:\n' > "${CONFIG_FILE}"
 DIR_COUNT=$(bashio::config 'directories | length')
 for i in $(seq 0 $((DIR_COUNT - 1))); do
@@ -30,6 +37,36 @@ if [[ -n "${TMDB_KEY}" ]]; then
 else
     bashio::log.info "TMDB API key: not set"
 fi
+
+AUTOMATION_ENABLED=$(bashio::config 'automation.enabled' 2>/dev/null || echo "false")
+AUTOMATION_TOKEN=$(bashio::config 'automation.token' 2>/dev/null || echo "")
+AUTOMATION_DRY_RUN=$(bashio::config 'automation.dry_run' 2>/dev/null || echo "true")
+AUTOMATION_ALLOW_ARR_SIDECAR=$(bashio::config 'automation.allow_arr_sidecar_output' 2>/dev/null || echo "false")
+AUTOMATION_DEFAULT_PROFILE=$(bashio::config 'automation.default_profile' 2>/dev/null || echo "high_quality_hevc_qp18")
+AUTOMATION_DEFAULT_POST_ACTION=$(bashio::config 'automation.default_post_action' 2>/dev/null || echo "keep")
+
+bashio::log.info "Automation: enabled=${AUTOMATION_ENABLED}, dry_run=${AUTOMATION_DRY_RUN}, allow_arr_sidecar_output=${AUTOMATION_ALLOW_ARR_SIDECAR}"
+if [[ -n "${AUTOMATION_TOKEN}" ]]; then
+    bashio::log.info "Automation token: configured"
+else
+    bashio::log.info "Automation token: not set"
+fi
+
+{
+    printf 'automation:\n'
+    printf '  enabled: %s\n' "${AUTOMATION_ENABLED}"
+    printf '  token: '
+    yaml_double_quote "${AUTOMATION_TOKEN}"
+    printf '\n'
+    printf '  dry_run: %s\n' "${AUTOMATION_DRY_RUN}"
+    printf '  allow_arr_sidecar_output: %s\n' "${AUTOMATION_ALLOW_ARR_SIDECAR}"
+    printf '  default_profile: '
+    yaml_double_quote "${AUTOMATION_DEFAULT_PROFILE}"
+    printf '\n'
+    printf '  default_post_action: '
+    yaml_double_quote "${AUTOMATION_DEFAULT_POST_ACTION}"
+    printf '\n'
+} >> "${CONFIG_FILE}"
 
 # Use the first directory's path as MEDIA_ROOT (the app's default browse root)
 MEDIA_ROOT_VAL=$(bashio::config 'directories[0].path')

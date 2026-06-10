@@ -1,0 +1,159 @@
+# MediaStat Automation Bridge V1
+
+V1 exposes a backend-only automation endpoint that validates requests from Radarr,
+Sonarr, SABnzbd, or qBittorrent and queues normal MediaStat encode jobs.
+
+V1 is dry-run first and keep-only. It does not delete, replace, rename, overwrite,
+move, stage, backup, quarantine, or refresh media/library records.
+
+## Example config.yaml
+
+```yaml
+automation:
+  enabled: true
+  token: "YOUR_AUTOMATION_TOKEN"
+  dry_run: true
+  allow_arr_sidecar_output: false
+  default_profile: high_quality_hevc_qp18
+  default_post_action: keep
+
+  schedule:
+    enabled: true
+    start: "02:00"
+    end: "06:00"
+    mode: finish_current
+    do_not_start_if_less_than_minutes_left: 90
+
+  profiles:
+    high_quality_hevc_qp18:
+      label: "High Quality HEVC QP18"
+      codec: hevc
+      gpu: auto
+      format: mkv
+      qp: 18
+      preset: quality
+      lang: eng
+    balanced_hevc_qp20:
+      label: "Balanced HEVC QP20"
+      codec: hevc
+      gpu: auto
+      format: mkv
+      qp: 20
+      preset: balanced
+      lang: eng
+    space_saver_hevc_qp23:
+      label: "Space Saver HEVC QP23"
+      codec: hevc
+      gpu: auto
+      format: mkv
+      qp: 23
+      preset: balanced
+      lang: eng
+
+  sources:
+    radarr:
+      enabled: true
+      allowed_events:
+        - import
+      default_profile: high_quality_hevc_qp18
+      default_post_action: keep
+      allow_replace: false
+    sonarr:
+      enabled: true
+      allowed_events:
+        - import
+      default_profile: balanced_hevc_qp20
+      default_post_action: keep
+      allow_replace: false
+    sab:
+      enabled: false
+      allowed_events:
+        - download_complete
+      managed_categories:
+        - radarr
+        - sonarr
+      manual_categories:
+        - manual
+        - mediastat
+        - encode
+      default_profile: balanced_hevc_qp20
+      default_post_action: keep
+      allow_replace: false
+    qbit:
+      enabled: false
+      allowed_events:
+        - download_complete
+      managed_categories:
+        - radarr
+        - sonarr
+      manual_categories:
+        - manual
+        - mediastat
+        - encode
+      default_profile: space_saver_hevc_qp23
+      default_post_action: keep
+      allow_replace: false
+```
+
+## Queue request
+
+### Local development
+
+When running MediaStat directly or with a locally exposed port, test against the
+local service URL:
+
+```bash
+curl -X POST "http://localhost:8080/automation/queue" \
+  -H "Content-Type: application/json" \
+  -H "X-Automation-Token: YOUR_AUTOMATION_TOKEN" \
+  -d '{
+    "source": "radarr",
+    "event": "import",
+    "path": "/media/library/Example.mkv",
+    "profile": "high_quality_hevc_qp18",
+    "post_action": "keep",
+    "category": ""
+  }'
+```
+
+### Home Assistant add-on
+
+When running as a Home Assistant add-on, configure automation in the add-on
+Configuration tab. The add-on writes those options to `/data/config.yaml` at
+startup, and MediaStat reads that file through `CONFIG_PATH`.
+
+Ingress is intended for browser UI access through Home Assistant. External
+automation clients should use the add-on's exposed port when available, for
+example:
+
+```bash
+curl -X POST "http://HOME_ASSISTANT_HOST:8080/automation/queue" \
+  -H "Content-Type: application/json" \
+  -H "X-Automation-Token: YOUR_AUTOMATION_TOKEN" \
+  -d '{
+    "source": "radarr",
+    "event": "import",
+    "path": "/media/library/Example.mkv",
+    "profile": "high_quality_hevc_qp18",
+    "post_action": "keep",
+    "category": ""
+  }'
+```
+
+Keep `dry_run: true` for first tests. MediaStat validates the request and returns
+the output path that would be queued, but it does not create an encode job.
+
+With `dry_run: false`, Radarr and Sonarr requests are blocked by default when the
+candidate output would be a live sidecar file in the same library folder as the
+input. Leave `allow_arr_sidecar_output: false` for V1 unless you are deliberately
+testing in a safe non-library location.
+
+Radarr and Sonarr import events are preferred for managed media. SABnzbd and
+qBittorrent completed-download events for managed categories are ignored so the
+library manager can handle final imports.
+
+## V1 limits
+
+V1 only supports `post_action: keep`. Destructive replace/delete workflows,
+staging output, backup/quarantine, Radarr/Sonarr refresh, dashboard UI, profile
+editor UI, token generator UI, and path mapping UI are reserved for later work.

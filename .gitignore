@@ -6,6 +6,14 @@ config.yaml
 *.db-shm
 *.db-wal
 .env
+*.log
+/data/
+media/
+*.tmp
+*.bak
+.mediastat-backup/
+.mediastat-staging/
+
 ha-addon/main.py
 ha-addon/requirements.txt
 ha-addon/templates/

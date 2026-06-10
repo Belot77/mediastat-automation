@@ -6,6 +6,7 @@ import logging
 import asyncio
 import math
 import secrets
+import copy
 import subprocess
 import tempfile
 import time
@@ -57,6 +58,130 @@ def _load_config() -> dict:
 
 
 _config = _load_config()
+
+
+DEFAULT_AUTOMATION_CONFIG: dict = {
+    "enabled": False,
+    "token": "",
+    "dry_run": True,
+    "allow_arr_sidecar_output": False,
+    "default_profile": "high_quality_hevc_qp18",
+    "default_post_action": "keep",
+    "schedule": {
+        "enabled": True,
+        "start": "02:00",
+        "end": "06:00",
+        "mode": "finish_current",
+        "do_not_start_if_less_than_minutes_left": 90,
+    },
+    "profiles": {
+        "archive_hevc_qp16": {
+            "label": "Archive HEVC QP16",
+            "codec": "hevc",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 16,
+            "preset": "quality",
+            "lang": "eng",
+        },
+        "high_quality_hevc_qp18": {
+            "label": "High Quality HEVC QP18",
+            "codec": "hevc",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 18,
+            "preset": "quality",
+            "lang": "eng",
+        },
+        "balanced_hevc_qp20": {
+            "label": "Balanced HEVC QP20",
+            "codec": "hevc",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 20,
+            "preset": "balanced",
+            "lang": "eng",
+        },
+        "space_saver_hevc_qp23": {
+            "label": "Space Saver HEVC QP23",
+            "codec": "hevc",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 23,
+            "preset": "balanced",
+            "lang": "eng",
+        },
+        "aggressive_hevc_qp26": {
+            "label": "Aggressive HEVC QP26",
+            "codec": "hevc",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 26,
+            "preset": "fast",
+            "lang": "eng",
+        },
+        "compat_h264_qp20": {
+            "label": "Compatibility H264 QP20",
+            "codec": "h264",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 20,
+            "preset": "balanced",
+            "lang": "eng",
+        },
+    },
+    "sources": {
+        "radarr": {
+            "enabled": True,
+            "allowed_events": ["import"],
+            "default_profile": "high_quality_hevc_qp18",
+            "default_post_action": "keep",
+            "allow_replace": False,
+        },
+        "sonarr": {
+            "enabled": True,
+            "allowed_events": ["import"],
+            "default_profile": "balanced_hevc_qp20",
+            "default_post_action": "keep",
+            "allow_replace": False,
+        },
+        "sab": {
+            "enabled": False,
+            "allowed_events": ["download_complete"],
+            "managed_categories": ["radarr", "sonarr"],
+            "manual_categories": ["manual", "mediastat", "encode"],
+            "default_profile": "balanced_hevc_qp20",
+            "default_post_action": "keep",
+            "allow_replace": False,
+        },
+        "qbit": {
+            "enabled": False,
+            "allowed_events": ["download_complete"],
+            "managed_categories": ["radarr", "sonarr"],
+            "manual_categories": ["manual", "mediastat", "encode"],
+            "default_profile": "space_saver_hevc_qp23",
+            "default_post_action": "keep",
+            "allow_replace": False,
+        },
+    },
+}
+
+
+def _deep_merge_config(default: dict, override: object) -> dict:
+    merged = copy.deepcopy(default)
+    if not isinstance(override, dict):
+        return merged
+    for key, value in override.items():
+        if isinstance(merged.get(key), dict) and isinstance(value, dict):
+            merged[key] = _deep_merge_config(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+AUTOMATION_CONFIG: dict = _deep_merge_config(
+    DEFAULT_AUTOMATION_CONFIG, _config.get("automation") or {}
+)
 
 # Optional TMDB API key — set tmdb_api_key in config.yaml to enable TMDB search
 TMDB_API_KEY: str = (_config.get("tmdb_api_key") or "").strip()
@@ -2489,18 +2614,58 @@ _encode_queue_event: asyncio.Event = asyncio.Event()
 _schedule_config: dict = {"enabled": False, "start": 22, "end": 6}
 
 
-def _schedule_active() -> bool:
+def _schedule_minutes(value: object, default_hour: int) -> int:
+    if isinstance(value, str) and ":" in value:
+        hour_s, minute_s = value.split(":", 1)
+        minute = max(0, min(59, int(minute_s)))
+        raw_hour = int(hour_s)
+        if raw_hour == 24 and minute == 0:
+            return 24 * 60
+        hour = max(0, min(23, raw_hour))
+        return hour * 60 + minute
+    raw_hour = int(value if value is not None else default_hour)
+    if raw_hour >= 24:
+        return 24 * 60
+    hour = max(0, min(23, raw_hour))
+    return hour * 60
+
+
+def _schedule_active(schedule: Optional[dict] = None) -> bool:
     """Returns True if encoding is allowed right now (or no schedule is set)."""
-    if not _schedule_config.get("enabled"):
+    schedule = schedule or _schedule_config
+    if not schedule.get("enabled"):
         return True
-    start = int(_schedule_config.get("start", 0))
-    end   = int(_schedule_config.get("end",   24))
-    now   = time.localtime().tm_hour
+    try:
+        start = _schedule_minutes(schedule.get("start", 0), 0)
+        end = _schedule_minutes(schedule.get("end", 24), 24)
+    except (TypeError, ValueError):
+        log.warning("Invalid encode schedule config; allowing queue to run")
+        return True
+    now_t = time.localtime()
+    now = now_t.tm_hour * 60 + now_t.tm_min
     if start == end:
         return True
     if start < end:
-        return start <= now < end
-    return now >= start or now < end
+        active = start <= now < end
+        minutes_left = end - now if active else 0
+    else:
+        active = now >= start or now < end
+        minutes_left = (24 * 60 - now + end) if now >= start else (end - now)
+    if not active:
+        return False
+    try:
+        min_left = int(schedule.get("do_not_start_if_less_than_minutes_left") or 0)
+    except (TypeError, ValueError):
+        min_left = 0
+    return min_left <= 0 or minutes_left >= min_left
+
+
+def _job_start_allowed(job: EncodeJob) -> bool:
+    if not _schedule_active(_schedule_config):
+        return False
+    if job.config.get("automation"):
+        return _schedule_active(AUTOMATION_CONFIG.get("schedule") or {})
+    return True
 
 
 def _enqueue_job(job_id: str) -> None:
@@ -2759,15 +2924,16 @@ async def _encode_worker() -> None:
             if not _encode_queue_list:   # re-check after clear to avoid race
                 await _encode_queue_event.wait()
             continue
-        # Respect encode schedule
-        if not _schedule_active():
-            await asyncio.sleep(60)
-            continue
         job_id = _encode_queue_list[0]
         job = _encode_jobs.get(job_id)
         if not job or job.status != "queued":
             _encode_queue_list.pop(0)
             _broadcast_queue_order()
+            continue
+        # Respect the existing global schedule and the automation window for
+        # automation-created jobs. finish_current is handled by only gating starts.
+        if not _job_start_allowed(job):
+            await asyncio.sleep(60)
             continue
         _encode_queue_list.pop(0)
         _broadcast_queue_order()
@@ -3790,8 +3956,7 @@ def _make_encode_config(body: dict) -> dict:
     }
 
 
-def _queue_file_encode(file_path: Path, config: dict) -> str | None:
-    """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
+def _encode_output_candidate(file_path: Path, config: dict) -> Path:
     fmt = config["format"]
     _codec_tag = {"h264": "-h264", "av1": "-av1"}.get(config.get("codec", "hevc"), "")
     base_stem = f"{file_path.stem} (qp{config['qp']}{_codec_tag})"
@@ -3801,6 +3966,12 @@ def _queue_file_encode(file_path: Path, config: dict) -> str | None:
     while str(candidate) in active_outputs or candidate.exists():
         candidate = file_path.parent / f"{base_stem}-{counter}.{fmt}"
         counter += 1
+    return candidate
+
+
+def _queue_file_encode(file_path: Path, config: dict) -> str | None:
+    """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
+    candidate = _encode_output_candidate(file_path, config)
     job_id = secrets.token_hex(8)
     job = EncodeJob(job_id, str(file_path), str(candidate), config)
     _encode_jobs[job_id] = job
@@ -3812,6 +3983,264 @@ def _queue_file_encode(file_path: Path, config: dict) -> str | None:
         return None
     _notify_encode(job_id)
     return job_id
+
+
+def _automation_reject(reason: str, status_code: int = 400, **context: object) -> None:
+    safe_context = {k: v for k, v in context.items() if v not in (None, "")}
+    log.warning("Automation queue rejected: %s context=%s", reason, safe_context)
+    raise HTTPException(
+        status_code=status_code,
+        detail={"error": reason, "queued": False, "ignored": False, **safe_context},
+    )
+
+
+def _automation_response(
+    *,
+    queued: bool,
+    ignored: bool,
+    dry_run: bool,
+    job_id: str | None,
+    source: str,
+    event: str,
+    category: str,
+    profile: str,
+    post_action: str,
+    input_path: str,
+    output_path: str | None,
+    warnings: list[str],
+) -> dict:
+    return {
+        "queued": queued,
+        "ignored": ignored,
+        "dry_run": dry_run,
+        "job_id": job_id,
+        "source": source,
+        "event": event,
+        "category": category,
+        "profile": profile,
+        "post_action": post_action,
+        "input_path": input_path,
+        "output_path": output_path,
+        "warnings": warnings,
+    }
+
+
+def _category_matches(category: str, configured: object) -> bool:
+    if not isinstance(configured, list):
+        return False
+    category_l = category.lower()
+    return category_l in {str(item).strip().lower() for item in configured}
+
+
+def _automation_path_allowed(path: Path) -> bool:
+    resolved = path.expanduser().resolve()
+    real = Path(os.path.realpath(resolved))
+    for root in ALLOWED_ROOTS:
+        root_resolved = root.expanduser().resolve()
+        root_real = Path(os.path.realpath(root_resolved))
+        if resolved == root_resolved or resolved.is_relative_to(root_resolved):
+            return True
+        if real == root_real or real.is_relative_to(root_real):
+            return True
+    return False
+
+
+def _select_automation_profile(body: dict, source_cfg: dict) -> str:
+    return str(
+        body.get("profile")
+        or source_cfg.get("default_profile")
+        or AUTOMATION_CONFIG.get("default_profile")
+        or ""
+    ).strip()
+
+
+def _select_automation_post_action(body: dict, source_cfg: dict) -> str:
+    return str(
+        body.get("post_action")
+        or source_cfg.get("default_post_action")
+        or AUTOMATION_CONFIG.get("default_post_action")
+        or "keep"
+    ).strip().lower()
+
+
+def _automation_auth(request: Request) -> None:
+    if not AUTOMATION_CONFIG.get("enabled"):
+        _automation_reject("automation is disabled", status_code=403)
+    expected = str(AUTOMATION_CONFIG.get("token") or "")
+    if not expected:
+        _automation_reject("automation token is not configured", status_code=403)
+    supplied = request.headers.get("X-Automation-Token") or ""
+    if not supplied:
+        _automation_reject("automation token is missing", status_code=403)
+    if not secrets.compare_digest(supplied, expected):
+        _automation_reject("automation token is invalid", status_code=403)
+
+
+@app.post("/automation/queue")
+async def automation_queue(request: Request):
+    _automation_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        _automation_reject("invalid JSON body")
+    if not isinstance(body, dict):
+        _automation_reject("invalid JSON body")
+
+    source = str(body.get("source") or "").strip().lower()
+    event = str(body.get("event") or "").strip().lower()
+    category = str(body.get("category") or "").strip()
+    input_path = str(body.get("path") or "").strip()
+    dry_run = bool(AUTOMATION_CONFIG.get("dry_run", True))
+
+    sources = AUTOMATION_CONFIG.get("sources") or {}
+    source_cfg = sources.get(source)
+    if not source or not isinstance(source_cfg, dict):
+        _automation_reject("source is unknown", source=source, event=event)
+    if not source_cfg.get("enabled"):
+        _automation_reject("source is disabled", source=source, event=event)
+
+    allowed_events = {str(item).strip().lower() for item in source_cfg.get("allowed_events") or []}
+    if event not in allowed_events:
+        _automation_reject("event is not allowed for source", source=source, event=event)
+
+    profile_name = _select_automation_profile(body, source_cfg)
+    post_action = _select_automation_post_action(body, source_cfg)
+
+    if source in ("sab", "qbit"):
+        if _category_matches(category, source_cfg.get("managed_categories")):
+            reason = "category is managed by Radarr/Sonarr; ignored"
+            log.info(
+                "Automation queue ignored: source=%s event=%s category=%s reason=%s",
+                source, event, category, reason,
+            )
+            return _automation_response(
+                queued=False, ignored=True, dry_run=dry_run, job_id=None,
+                source=source, event=event, category=category, profile=profile_name,
+                post_action=post_action, input_path=input_path, output_path=None,
+                warnings=[reason],
+            )
+        manual_categories = source_cfg.get("manual_categories")
+        if isinstance(manual_categories, list) and manual_categories and not _category_matches(category, manual_categories):
+            reason = "category is not configured for manual MediaStat automation; ignored"
+            log.info(
+                "Automation queue ignored: source=%s event=%s category=%s reason=%s",
+                source, event, category, reason,
+            )
+            return _automation_response(
+                queued=False, ignored=True, dry_run=dry_run, job_id=None,
+                source=source, event=event, category=category, profile=profile_name,
+                post_action=post_action, input_path=input_path, output_path=None,
+                warnings=[reason],
+            )
+
+    profiles = AUTOMATION_CONFIG.get("profiles") or {}
+    profile_cfg = profiles.get(profile_name)
+    if not isinstance(profile_cfg, dict):
+        _automation_reject("profile is unknown", source=source, event=event, profile=profile_name)
+    if post_action != "keep":
+        _automation_reject(
+            "post_action must be keep for automation V1",
+            source=source, event=event, profile=profile_name, post_action=post_action,
+        )
+    if not input_path:
+        _automation_reject("path is missing", source=source, event=event, profile=profile_name)
+
+    file_path = Path(input_path).expanduser()
+    if not file_path.exists():
+        _automation_reject(
+            "path does not exist",
+            status_code=404,
+            source=source, event=event, profile=profile_name, input_path=input_path,
+        )
+    if not _automation_path_allowed(file_path):
+        _automation_reject(
+            "path is outside MediaStat allowed roots",
+            status_code=403,
+            source=source, event=event, profile=profile_name, input_path=input_path,
+        )
+    if file_path.is_dir():
+        _automation_reject(
+            "directory paths are not supported by automation V1",
+            source=source, event=event, profile=profile_name, input_path=input_path,
+        )
+    if not file_path.is_file():
+        _automation_reject(
+            "path is not a file",
+            source=source, event=event, profile=profile_name, input_path=input_path,
+        )
+
+    try:
+        config = _make_encode_config(profile_cfg)
+    except (TypeError, ValueError):
+        _automation_reject("profile config is invalid", source=source, event=event, profile=profile_name)
+    config.update({
+        "automation": True,
+        "automation_source": source,
+        "automation_event": event,
+        "automation_profile": profile_name,
+        "automation_post_action": "keep",
+        "automation_original_path": str(file_path),
+        "automation_category": category,
+        "automation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+    output_path = _encode_output_candidate(file_path, config)
+    warnings: list[str] = []
+
+    if (
+        source in ("radarr", "sonarr")
+        and not dry_run
+        and not AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)
+        and output_path.parent == file_path.parent
+    ):
+        _automation_reject(
+            "live Radarr/Sonarr sidecar output is blocked in automation V1",
+            status_code=409,
+            source=source,
+            event=event,
+            profile=profile_name,
+            input_path=str(file_path),
+            output_path=str(output_path),
+        )
+
+    if dry_run:
+        log.info(
+            "Automation dry-run accepted: source=%s event=%s category=%s profile=%s input=%s output=%s",
+            source, event, category, profile_name, file_path, output_path,
+        )
+        return _automation_response(
+            queued=False, ignored=False, dry_run=True, job_id=None,
+            source=source, event=event, category=category, profile=profile_name,
+            post_action="keep", input_path=str(file_path), output_path=str(output_path),
+            warnings=warnings,
+        )
+
+    if not shutil.which("ffmpeg"):
+        _automation_reject(
+            "ffmpeg not found in PATH",
+            status_code=503,
+            source=source, event=event, profile=profile_name, input_path=str(file_path),
+        )
+
+    job_id = _queue_file_encode(file_path, config)
+    if not job_id:
+        _automation_reject(
+            "encode job could not be queued",
+            status_code=503,
+            source=source, event=event, profile=profile_name, input_path=str(file_path),
+        )
+    await _save_encode_job(_encode_jobs[job_id])
+    _enqueue_job(job_id)
+    queued_output = _encode_jobs[job_id].output_path
+    log.info(
+        "Automation queue accepted: source=%s event=%s category=%s profile=%s job=%s input=%s output=%s",
+        source, event, category, profile_name, job_id, file_path, queued_output,
+    )
+    return _automation_response(
+        queued=True, ignored=False, dry_run=False, job_id=job_id,
+        source=source, event=event, category=category, profile=profile_name,
+        post_action="keep", input_path=str(file_path), output_path=queued_output,
+        warnings=warnings,
+    )
 
 
 @app.post("/encode/folder")

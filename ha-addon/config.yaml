@@ -21,6 +21,13 @@ options:
       path: /media
   tmdb_api_key: ""
   log_level: "info"
+  automation:
+    enabled: false
+    token: ""
+    dry_run: true
+    allow_arr_sidecar_output: false
+    default_profile: high_quality_hevc_qp18
+    default_post_action: keep
 
 schema:
   directories:
@@ -28,6 +35,13 @@ schema:
       path: str
   tmdb_api_key: str?
   log_level: list(debug|info|warning|error)
+  automation:
+    enabled: bool
+    token: str?
+    dry_run: bool
+    allow_arr_sidecar_output: bool
+    default_profile: str
+    default_post_action: list(keep)
 
 # Port used when not using ingress
 ports:
