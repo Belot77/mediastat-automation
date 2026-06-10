@@ -3985,8 +3985,88 @@ def _queue_file_encode(file_path: Path, config: dict) -> str | None:
     return job_id
 
 
+_AUTOMATION_LAST: dict = {"request": None, "result": None, "timestamp": None}
+
+
+def _automation_timestamp() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _automation_source_policy() -> dict:
+    policies: dict = {}
+    sources = AUTOMATION_CONFIG.get("sources") or {}
+    if not isinstance(sources, dict):
+        return policies
+    for name, cfg in sources.items():
+        if not isinstance(cfg, dict):
+            continue
+        policies[str(name)] = {
+            "enabled": bool(cfg.get("enabled")),
+            "allowed_events": list(cfg.get("allowed_events") or []),
+            "default_profile": cfg.get("default_profile") or AUTOMATION_CONFIG.get("default_profile"),
+            "default_post_action": cfg.get("default_post_action") or AUTOMATION_CONFIG.get("default_post_action"),
+            "managed_categories": list(cfg.get("managed_categories") or []),
+            "manual_categories": list(cfg.get("manual_categories") or []),
+            "allow_replace": bool(cfg.get("allow_replace", False)),
+        }
+    return policies
+
+
+def _automation_status_payload() -> dict:
+    sources = _automation_source_policy()
+    return {
+        "enabled": bool(AUTOMATION_CONFIG.get("enabled")),
+        "dry_run": bool(AUTOMATION_CONFIG.get("dry_run", True)),
+        "allow_arr_sidecar_output": bool(AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)),
+        "default_profile": AUTOMATION_CONFIG.get("default_profile"),
+        "default_post_action": AUTOMATION_CONFIG.get("default_post_action"),
+        "token_configured": bool(AUTOMATION_CONFIG.get("token")),
+        "enabled_sources": [name for name, cfg in sources.items() if cfg.get("enabled")],
+        "sources": sources,
+        "last_automation_request": _AUTOMATION_LAST.get("request"),
+        "last_automation_result": _AUTOMATION_LAST.get("result"),
+        "last_automation_timestamp": _AUTOMATION_LAST.get("timestamp"),
+    }
+
+
+def _remember_automation_request(**summary: object) -> None:
+    clean = {
+        "source": str(summary.get("source") or ""),
+        "event": str(summary.get("event") or ""),
+        "category": str(summary.get("category") or ""),
+        "profile": str(summary.get("profile") or ""),
+        "post_action": str(summary.get("post_action") or ""),
+        "input_path": str(summary.get("input_path") or ""),
+        "output_path": str(summary.get("output_path") or ""),
+    }
+    _AUTOMATION_LAST["request"] = clean
+    _AUTOMATION_LAST["timestamp"] = _automation_timestamp()
+
+
+def _remember_automation_result(decision: str, reason: str = "", **summary: object) -> None:
+    clean = {
+        "decision": decision,
+        "reason": reason,
+        "queued": bool(summary.get("queued", False)),
+        "ignored": bool(summary.get("ignored", False)),
+        "dry_run": bool(summary.get("dry_run", False)),
+        "job_id": summary.get("job_id"),
+        "source": str(summary.get("source") or ""),
+        "event": str(summary.get("event") or ""),
+        "category": str(summary.get("category") or ""),
+        "profile": str(summary.get("profile") or ""),
+        "post_action": str(summary.get("post_action") or ""),
+        "input_path": str(summary.get("input_path") or ""),
+        "output_path": str(summary.get("output_path") or ""),
+        "warnings": list(summary.get("warnings") or []),
+    }
+    _AUTOMATION_LAST["result"] = clean
+    _AUTOMATION_LAST["timestamp"] = _automation_timestamp()
+
+
 def _automation_reject(reason: str, status_code: int = 400, **context: object) -> None:
     safe_context = {k: v for k, v in context.items() if v not in (None, "")}
+    _remember_automation_result("rejected", reason, **safe_context)
     log.warning("Automation queue rejected: %s context=%s", reason, safe_context)
     raise HTTPException(
         status_code=status_code,
@@ -4008,8 +4088,9 @@ def _automation_response(
     input_path: str,
     output_path: str | None,
     warnings: list[str],
+    reason: str = "",
 ) -> dict:
-    return {
+    payload = {
         "queued": queued,
         "ignored": ignored,
         "dry_run": dry_run,
@@ -4023,6 +4104,16 @@ def _automation_response(
         "output_path": output_path,
         "warnings": warnings,
     }
+    if ignored:
+        decision = "ignored"
+    elif queued:
+        decision = "queued"
+    elif dry_run:
+        decision = "accepted_dry_run"
+    else:
+        decision = "accepted"
+    _remember_automation_result(decision, reason, **payload)
+    return payload
 
 
 def _category_matches(category: str, configured: object) -> bool:
@@ -4076,8 +4167,22 @@ def _automation_auth(request: Request) -> None:
         _automation_reject("automation token is invalid", status_code=403)
 
 
+@app.get("/automation/status")
+async def automation_status():
+    return _automation_status_payload()
+
+
+@app.get("/automation", response_class=HTMLResponse)
+async def automation_page(request: Request):
+    return templates.TemplateResponse("automation.html", {
+        "request": request,
+        "ingress_path": request.state.ingress_path,
+    })
+
+
 @app.post("/automation/queue")
 async def automation_queue(request: Request):
+    _remember_automation_request()
     _automation_auth(request)
     try:
         body = await request.json()
@@ -4091,6 +4196,7 @@ async def automation_queue(request: Request):
     category = str(body.get("category") or "").strip()
     input_path = str(body.get("path") or "").strip()
     dry_run = bool(AUTOMATION_CONFIG.get("dry_run", True))
+    _remember_automation_request(source=source, event=event, category=category, input_path=input_path)
 
     sources = AUTOMATION_CONFIG.get("sources") or {}
     source_cfg = sources.get(source)
@@ -4105,6 +4211,10 @@ async def automation_queue(request: Request):
 
     profile_name = _select_automation_profile(body, source_cfg)
     post_action = _select_automation_post_action(body, source_cfg)
+    _remember_automation_request(
+        source=source, event=event, category=category, input_path=input_path,
+        profile=profile_name, post_action=post_action,
+    )
 
     if source in ("sab", "qbit"):
         if _category_matches(category, source_cfg.get("managed_categories")):
@@ -4117,7 +4227,7 @@ async def automation_queue(request: Request):
                 queued=False, ignored=True, dry_run=dry_run, job_id=None,
                 source=source, event=event, category=category, profile=profile_name,
                 post_action=post_action, input_path=input_path, output_path=None,
-                warnings=[reason],
+                warnings=[reason], reason=reason,
             )
         manual_categories = source_cfg.get("manual_categories")
         if isinstance(manual_categories, list) and manual_categories and not _category_matches(category, manual_categories):
@@ -4130,7 +4240,7 @@ async def automation_queue(request: Request):
                 queued=False, ignored=True, dry_run=dry_run, job_id=None,
                 source=source, event=event, category=category, profile=profile_name,
                 post_action=post_action, input_path=input_path, output_path=None,
-                warnings=[reason],
+                warnings=[reason], reason=reason,
             )
 
     profiles = AUTOMATION_CONFIG.get("profiles") or {}
@@ -4185,6 +4295,10 @@ async def automation_queue(request: Request):
     })
     output_path = _encode_output_candidate(file_path, config)
     warnings: list[str] = []
+    _remember_automation_request(
+        source=source, event=event, category=category, input_path=str(file_path),
+        output_path=str(output_path), profile=profile_name, post_action=post_action,
+    )
 
     if (
         source in ("radarr", "sonarr")

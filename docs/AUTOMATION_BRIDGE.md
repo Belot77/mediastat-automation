@@ -148,6 +148,25 @@ candidate output would be a live sidecar file in the same library folder as the
 input. Leave `allow_arr_sidecar_output: false` for V1 unless you are deliberately
 testing in a safe non-library location.
 
+## Automation status page
+
+Open `Automation` from the MediaStat header to view the current safe automation
+configuration and the most recent automation decision. The page shows whether
+automation is enabled, whether dry-run is active, whether a token is configured,
+source policy, and the last request/result summary.
+
+The page never renders the token value. It only shows `token_configured` as
+`true` or `false`.
+
+For direct HTTP checks, request:
+
+```bash
+curl "http://localhost:8080/automation/status"
+```
+
+When running through the Home Assistant add-on, use the ingress UI link or the
+add-on's exposed host port if direct HTTP access is enabled.
+
 Radarr and Sonarr import events are preferred for managed media. SABnzbd and
 qBittorrent completed-download events for managed categories are ignored so the
 library manager can handle final imports.

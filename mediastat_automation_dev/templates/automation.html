@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Automation - MediaStat</title>
+    <link rel="stylesheet" href="{{ ingress_path }}/static/app.css">
+    <style>
+        main { max-width: 1180px; margin: 24px auto; padding: 0 18px 32px; }
+        .automation-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
+        .automation-panel {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: var(--panel);
+            padding: 16px;
+        }
+        .automation-panel h2 { margin: 0 0 12px; font-size: var(--fs-lg); }
+        .automation-kv { display: grid; grid-template-columns: minmax(130px, 0.42fr) 1fr; gap: 8px 12px; }
+        .automation-kv dt { color: var(--muted); }
+        .automation-kv dd { margin: 0; overflow-wrap: anywhere; }
+        .decision-badge {
+            display: inline-block;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 2px 9px;
+            font-size: var(--fs-sm);
+            text-transform: uppercase;
+        }
+        .decision-badge.accepted_dry_run { color: var(--blue); border-color: var(--blue); }
+        .decision-badge.rejected { color: var(--red); border-color: var(--red); }
+        .decision-badge.ignored { color: var(--yellow); border-color: var(--yellow); }
+        .decision-badge.queued { color: var(--green); border-color: var(--green); }
+        .source-table { width: 100%; border-collapse: collapse; font-size: var(--fs-sm); }
+        .source-table th, .source-table td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: top; }
+        .source-table th { color: var(--muted); font-weight: 600; }
+        .status-note { color: var(--muted); margin: 0 0 16px; }
+    </style>
+</head>
+<body>
+<header>
+    <a href="{{ ingress_path }}/" class="back-link">← MediaStat</a>
+    <span style="color:var(--muted)">Automation</span>
+</header>
+
+<main>
+    <p class="status-note">Automation V1 is dry-run first and keep-only. Tokens are never shown here.</p>
+
+    <div class="automation-grid">
+        <section class="automation-panel">
+            <h2>Config</h2>
+            <dl class="automation-kv" id="automation-config"></dl>
+        </section>
+
+        <section class="automation-panel">
+            <h2>Last Decision</h2>
+            <dl class="automation-kv" id="automation-result"></dl>
+        </section>
+
+        <section class="automation-panel">
+            <h2>Last Request</h2>
+            <dl class="automation-kv" id="automation-request"></dl>
+        </section>
+    </div>
+
+    <section class="automation-panel" style="margin-top:14px">
+        <h2>Source Policy</h2>
+        <div id="automation-sources"></div>
+    </section>
+</main>
+
+<script>
+const BASE_PATH = {{ ingress_path|tojson }};
+
+function esc(value) {
+    return String(value ?? '').replace(/[&<>"']/g, ch => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[ch]));
+}
+
+function boolText(value) {
+    return value ? 'true' : 'false';
+}
+
+function addRows(el, rows) {
+    el.innerHTML = rows.map(([label, value]) =>
+        `<dt>${esc(label)}</dt><dd>${value || '<span style="color:var(--muted)">none</span>'}</dd>`
+    ).join('');
+}
+
+function displayDecision(decision) {
+    const labels = {
+        accepted_dry_run: 'Accepted dry-run',
+        rejected: 'Rejected',
+        ignored: 'Ignored',
+        queued: 'Queued',
+        accepted: 'Accepted'
+    };
+    const safe = esc(decision || 'none');
+    const label = labels[decision] || safe;
+    return `<span class="decision-badge ${safe}">${esc(label)}</span>`;
+}
+
+function listValue(value) {
+    return Array.isArray(value) && value.length ? esc(value.join(', ')) : '';
+}
+
+async function loadAutomationStatus() {
+    const resp = await fetch(`${BASE_PATH}/automation/status`, { cache: 'no-store' });
+    if (!resp.ok) throw new Error(`status ${resp.status}`);
+    const data = await resp.json();
+
+    addRows(document.getElementById('automation-config'), [
+        ['enabled', esc(boolText(data.enabled))],
+        ['dry_run', esc(boolText(data.dry_run))],
+        ['allow_arr_sidecar_output', esc(boolText(data.allow_arr_sidecar_output))],
+        ['default_profile', esc(data.default_profile)],
+        ['default_post_action', esc(data.default_post_action)],
+        ['token_configured', esc(boolText(data.token_configured))],
+        ['enabled_sources', listValue(data.enabled_sources)]
+    ]);
+
+    const result = data.last_automation_result || {};
+    addRows(document.getElementById('automation-result'), [
+        ['decision', displayDecision(result.decision)],
+        ['reason', esc(result.reason)],
+        ['source/event/category', esc([result.source, result.event, result.category].filter(Boolean).join(' / '))],
+        ['profile/post_action', esc([result.profile, result.post_action].filter(Boolean).join(' / '))],
+        ['input_path', esc(result.input_path)],
+        ['output_path', esc(result.output_path)],
+        ['job_id', esc(result.job_id)],
+        ['timestamp', esc(data.last_automation_timestamp)]
+    ]);
+
+    const req = data.last_automation_request || {};
+    addRows(document.getElementById('automation-request'), [
+        ['source/event/category', esc([req.source, req.event, req.category].filter(Boolean).join(' / '))],
+        ['profile/post_action', esc([req.profile, req.post_action].filter(Boolean).join(' / '))],
+        ['input_path', esc(req.input_path)],
+        ['output_path', esc(req.output_path)]
+    ]);
+
+    const sources = data.sources || {};
+    const rows = Object.entries(sources).map(([name, cfg]) => `
+        <tr>
+            <td>${esc(name)}</td>
+            <td>${esc(boolText(cfg.enabled))}</td>
+            <td>${listValue(cfg.allowed_events)}</td>
+            <td>${esc(cfg.default_profile)}</td>
+            <td>${esc(cfg.default_post_action)}</td>
+            <td>${esc(boolText(cfg.allow_replace))}</td>
+        </tr>
+    `).join('');
+    document.getElementById('automation-sources').innerHTML = `
+        <table class="source-table">
+            <thead>
+                <tr><th>source</th><th>enabled</th><th>events</th><th>profile</th><th>post action</th><th>replace</th></tr>
+            </thead>
+            <tbody>${rows || '<tr><td colspan="6">No source policy configured</td></tr>'}</tbody>
+        </table>
+    `;
+}
+
+loadAutomationStatus().catch(err => {
+    document.getElementById('automation-result').innerHTML =
+        `<dt>error</dt><dd>${esc(err.message)}</dd>`;
+});
+</script>
+</body>
+</html>
