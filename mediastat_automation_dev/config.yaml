@@ -1,0 +1,84 @@
+---
+name: "MediaStat Automation Dev"
+version: "1.0.34-dev1"
+slug: "mediastat_automation_dev"
+description: "Media browser, health checker and HandBrake transcoder for your library"
+url: "https://github.com/Belot77/mediastat-automation"
+arch:
+  - amd64
+
+startup: application
+boot: auto
+init: false
+
+# Options exposed in the HA add-on UI
+options:
+  directories:
+    - label: Media
+      path: /media
+  tmdb_api_key: ""
+  log_level: "info"
+  automation:
+    enabled: false
+    token: ""
+    dry_run: true
+    allow_arr_sidecar_output: false
+    default_profile: high_quality_hevc_qp18
+    default_post_action: keep
+
+schema:
+  directories:
+    - label: str
+      path: str
+  tmdb_api_key: str?
+  log_level: list(debug|info|warning|error)
+  automation:
+    enabled: bool
+    token: str?
+    dry_run: bool
+    allow_arr_sidecar_output: bool
+    default_profile: str
+    default_post_action: list(keep)
+
+# Port used when not using ingress
+ports:
+  8080/tcp: 8081
+ports_description:
+  8080/tcp: "MediaStat web interface"
+
+# Ingress — embeds the UI inside the HA sidebar
+ingress: true
+ingress_port: 8080
+ingress_stream: true
+panel_icon: "mdi:filmstrip"
+panel_title: "MediaStat Dev"
+
+# HA filesystem access
+map:
+  - media:rw    # /media  — HA media directory (movies, TV, etc.)
+  - share:ro    # /share  — optional, for media on network shares mounted by HA
+
+# Full access is required for GPU hardware encoding (Intel QSV / VA-API / NVENC).
+# Without it the HA supervisor's seccomp profile blocks the DRM ioctls that
+# libva needs to communicate with the GPU driver, causing "No VA display found"
+# errors even when /dev/dri is mapped and the iHD driver is installed.
+# On machines without a GPU this has no practical effect.
+full_access: true
+
+# GPU passthrough — DRI render nodes for Intel QSV / AMD VA-API.
+# HA supervisor silently skips any device that doesn't exist on the host,
+# so this is safe on machines without a GPU (software encoding is used instead).
+devices:
+  - /dev/dri
+#
+# NVIDIA NVENC requires additional host setup (nvidia-container-runtime).
+# Add these manually if needed:
+#   - /dev/nvidia0
+#   - /dev/nvidiactl
+#   - /dev/nvidia-uvm
+#   - /dev/nvidia-modeset
+
+# Persistent storage lives in /data (backed up with HA backups)
+# The add-on writes:
+#   /data/mediastat.db   — file metadata cache and encode job history
+#   /data/config.yaml    — optional directory config (auto-created on first run)

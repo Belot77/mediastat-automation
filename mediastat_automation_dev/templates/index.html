@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MediaStat</title>
+    <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js"
+            integrity="sha384-HGfztofotfshcF7+8n44JQL2oJmowVChPTg48S+jvZoztPfvwD79OC/LTtG6dMp+"
+            crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js"
+            integrity="sha384-oJR5PTkR0gvqJ/UnX1IkFQgxg6BByX7jPWmgSSY5dz0+Yc7O3mloo717zZpF/xpb"
+            crossorigin="anonymous"></script>
+    <link rel="stylesheet" href="{{ ingress_path }}/static/app.css">
+</head>
+<body>
+    <header>
+        <span class="logo">▶ MediaStat</span>
+        <form class="path-form" action="/set-root" method="post">
+            {% if configured_dirs %}
+            <select class="path-input" name="path" onchange="this.form.submit()">
+                {% for d in configured_dirs %}
+                <option value="{{ d.path }}"{% if d.path == media_root %} selected{% endif %}>
+                    {{- d.label or d.path -}}
+                </option>
+                {% endfor %}
+            </select>
+            {% else %}
+            <input class="path-input" type="text" name="path"
+                   value="{{ media_root }}" spellcheck="false"
+                   aria-label="Scan folder">
+            <button class="btn" type="submit">Go</button>
+            {% endif %}
+        </form>
+        <input id="search-input" class="search-input" type="search"
+               placeholder="search…" autocomplete="off" spellcheck="false"
+               oninput="applyGlobalSearch()">
+        <button class="btn" onclick="openSearchSettings()" title="Configure search sites">⚙ searches</button>
+        <button class="btn" onclick="openDupesModal()" title="Find likely duplicate files by name similarity">⊕ dupes</button>
+        <button class="btn" onclick="openExportModal()" title="Export file list">↓ export</button>
+        <button class="btn" onclick="openHealthModal()" title="Health check — scan all files for issues">✦ health</button>
+        <button class="btn" id="batch-toggle-btn" onclick="toggleBatchMode()" title="Select files for batch encode">☐ select</button>
+        <button class="btn" title="Clear cached metadata and re-scan all files"
+                onclick="if(confirm('Rescan will clear all cached file metadata. Continue?'))fetch('/rescan',{method:'POST',headers:{'X-Delete-Token':DELETE_TOKEN}}).then(()=>location.reload())">
+            ↺ Rescan
+        </button>
+        <a href="{{ ingress_path }}/encode" class="btn" id="encode-jobs-btn" title="View encode jobs" style="text-decoration:none">⚙ Jobs</a>
+        <a href="{{ ingress_path }}/imdb-scan" class="btn" title="IMDb background scan" style="margin-left:auto;text-decoration:none">⬡ IMDb</a>
+        <a href="{{ ingress_path }}/databases" class="btn" title="Databases &amp; system info" style="text-decoration:none">⬡ DB</a>
+    </header>
+
+    <div id="global-sort-bar" class="sort-bar" style="border-bottom:1px solid var(--border);padding:4px 12px;">
+        <span class="sort-label">sort:</span>
+        <button class="sort-btn active" data-sort="name"  onclick="sortAll(this)" title="Sort by filename">name</button>
+        <button class="sort-btn"        data-sort="size"  onclick="sortAll(this)" title="Sort by file size">size</button>
+        <button class="sort-btn"        data-sort="date"  onclick="sortAll(this)" title="Sort by modified date">date</button>
+        <span class="ctrl-sep">│</span>
+        <span class="sort-label">res:</span>
+        <button class="filter-btn" data-filter-group="res" data-filter-val="4k"    onclick="toggleFilter(this)" title="Show only 4K files">4K</button>
+        <button class="filter-btn" data-filter-group="res" data-filter-val="1080p" onclick="toggleFilter(this)" title="Show only 1080p files">1080p</button>
+        <button class="filter-btn" data-filter-group="res" data-filter-val="720p"  onclick="toggleFilter(this)" title="Show only 720p files">720p</button>
+        <button class="filter-btn" data-filter-group="res" data-filter-val="sd"    onclick="toggleFilter(this)" title="Show only SD files">SD</button>
+        <span class="ctrl-sep">│</span>
+        <span class="sort-label">hdr:</span>
+        <span id="filter-hdr"></span>
+        <span class="ctrl-sep">│</span>
+        <span class="sort-label">format:</span>
+        <span id="filter-ext"></span>
+        <span class="ctrl-sep">│</span>
+        <span class="sort-label">codec:</span>
+        <span id="filter-codecs"></span>
+        <span class="ctrl-sep">│</span>
+        <span class="sort-label">audio:</span>
+        <span id="filter-audio"></span>
+        <span class="ctrl-sep">│</span>
+        <button class="filter-btn" data-filter-group="imdb" data-filter-val="unmatched" onclick="toggleFilter(this)" title="Show only files without an IMDb match">no IMDb</button>
+    </div>
+
+    {% if error %}
+    <div class="error-banner">Path not found: {{ error }}</div>
+    {% endif %}
+
+    <div id="folder-header" class="folder-header">
+        <span id="folder-header-name" class="folder-header-name"></span>
+        <span id="folder-header-usage" class="folder-header-usage"></span>
+    </div>
+
+    <main id="root-content"
+          hx-get="/dir?path={{ media_root | pathquote }}"
+          hx-trigger="load"
+          hx-target="this"
+          hx-swap="innerHTML">
+        <div class="root-loading">Loading media library…</div>
+    </main>
+
+    {% include "_modals.html" %}
+
+    <script>
+    const DELETE_TOKEN = "{{ delete_token }}";
+    const BASE_PATH    = "{{ ingress_path }}";  // e.g. "/api/hassio_ingress/TOKEN" or ""
+    const MEDIA_ROOT   = {{ media_root | tojson }};
+    </script>
+    <script src="{{ ingress_path }}/static/app.js"></script>
+</body>
+</html>
