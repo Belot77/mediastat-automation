@@ -167,6 +167,81 @@ curl "http://localhost:8080/automation/status"
 When running through the Home Assistant add-on, use the ingress UI link or the
 add-on's exposed host port if direct HTTP access is enabled.
 
+## Radarr/Sonarr dry-run integration
+
+Keep automation in dry-run mode while wiring Radarr or Sonarr:
+
+```yaml
+automation:
+  dry_run: true
+  allow_arr_sidecar_output: false
+  default_post_action: keep
+```
+
+Requests should send `post_action: "keep"` or omit `post_action` so the source
+default resolves to `keep`. V1 does not replace, delete, move, stage, back up, or
+refresh library entries.
+
+Use Radarr/Sonarr import events for managed media. Keep qBit/SAB automation
+disabled for now so download-complete events do not race the library manager or
+create confusing duplicate decisions before import has completed.
+
+### Radarr import payload
+
+Use this shape from a Radarr custom script or webhook after an import event. The
+exact media path should be the final imported movie file path that MediaStat can
+read under its allowed roots.
+
+```json
+{
+  "source": "radarr",
+  "event": "import",
+  "path": "/media/library/Movie Example (2026)/Movie Example (2026).mkv",
+  "profile": "high_quality_hevc_qp18",
+  "post_action": "keep",
+  "category": ""
+}
+```
+
+### Sonarr import payload
+
+Use this shape from a Sonarr custom script or webhook after an episode import
+event. The path should be the final imported episode file path.
+
+```json
+{
+  "source": "sonarr",
+  "event": "import",
+  "path": "/media/library/Series Example/Season 01/Series Example - S01E01.mkv",
+  "profile": "balanced_hevc_qp20",
+  "post_action": "keep",
+  "category": ""
+}
+```
+
+### Dry-run helper scripts
+
+Windows PowerShell:
+
+```powershell
+$env:MEDIASTAT_AUTOMATION_URL = "http://localhost:8080/automation/queue"
+$env:MEDIASTAT_AUTOMATION_TOKEN = "YOUR_AUTOMATION_TOKEN"
+.\docs\examples\automation-dryrun-test.ps1 radarr "C:\Path\To\Imported\File.mkv"
+.\docs\examples\automation-dryrun-test.ps1 sonarr "C:\Path\To\Imported\Episode.mkv" balanced_hevc_qp20
+```
+
+Linux/container shell:
+
+```bash
+export MEDIASTAT_AUTOMATION_URL="http://localhost:8080/automation/queue"
+export MEDIASTAT_AUTOMATION_TOKEN="YOUR_AUTOMATION_TOKEN"
+./docs/examples/automation-dryrun-test.sh radarr "/media/library/Movie Example (2026)/Movie Example (2026).mkv"
+./docs/examples/automation-dryrun-test.sh sonarr "/media/library/Series Example/Season 01/Series Example - S01E01.mkv" balanced_hevc_qp20
+```
+
+Both scripts print the HTTP status and response body. They do not contain a real
+token; set `MEDIASTAT_AUTOMATION_TOKEN` in your shell before running them.
+
 Radarr and Sonarr import events are preferred for managed media. SABnzbd and
 qBittorrent completed-download events for managed categories are ignored so the
 library manager can handle final imports.
