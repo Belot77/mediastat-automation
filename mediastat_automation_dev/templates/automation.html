@@ -64,6 +64,13 @@
         .source-table th, .source-table td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: top; }
         .source-table td { overflow-wrap: anywhere; word-break: break-word; }
         .source-table th { color: var(--muted); font-weight: 600; }
+        .history-table-wrap { width: 100%; overflow-x: auto; }
+        .history-table { width: 100%; min-width: 1040px; border-collapse: collapse; font-size: var(--fs-sm); }
+        .history-table th, .history-table td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: top; }
+        .history-table th { color: var(--muted); font-weight: 600; }
+        .history-table td { overflow-wrap: anywhere; word-break: break-word; }
+        .history-table .path-cell { min-width: 190px; max-width: 280px; overflow-wrap: anywhere; word-break: break-word; }
+        .history-table .compact-cell { max-width: 140px; }
         .status-note { color: var(--muted); margin: 0 0 16px; }
         @media (max-width: 900px) {
             .automation-grid {
@@ -108,6 +115,11 @@
     </div>
 
     <section class="automation-panel" style="margin-top:14px">
+        <h2>Recent Automation History</h2>
+        <div id="automation-history"></div>
+    </section>
+
+    <section class="automation-panel" style="margin-top:14px">
         <h2>Source Policy</h2>
         <div id="automation-sources"></div>
     </section>
@@ -149,6 +161,51 @@ function listValue(value) {
     return Array.isArray(value) && value.length ? esc(value.join(', ')) : '';
 }
 
+function compactSource(value) {
+    return esc([value.source, value.event, value.category].filter(Boolean).join(' / '));
+}
+
+function renderHistory(history) {
+    const rows = (Array.isArray(history) ? history : []).map(item => {
+        const reason = item.error || item.reason || '';
+        return `
+            <tr>
+                <td>${esc(item.timestamp)}</td>
+                <td>${displayDecision(item.decision || item.result)}</td>
+                <td class="compact-cell">${compactSource(item)}</td>
+                <td>${esc(boolText(item.dry_run))}</td>
+                <td>${esc(boolText(item.queued))}</td>
+                <td>${esc(boolText(item.ignored))}</td>
+                <td class="compact-cell">${esc(item.profile)}</td>
+                <td class="path-cell">${esc(item.input_path)}</td>
+                <td class="path-cell">${esc(item.output_path)}</td>
+                <td class="compact-cell">${esc(reason)}</td>
+            </tr>
+        `;
+    }).join('');
+    document.getElementById('automation-history').innerHTML = `
+        <div class="history-table-wrap">
+            <table class="history-table">
+                <thead>
+                    <tr>
+                        <th>timestamp</th>
+                        <th>decision/result</th>
+                        <th>source/event/category</th>
+                        <th>dry_run</th>
+                        <th>queued</th>
+                        <th>ignored</th>
+                        <th>profile</th>
+                        <th>input_path</th>
+                        <th>output_path</th>
+                        <th>error/reason</th>
+                    </tr>
+                </thead>
+                <tbody>${rows || '<tr><td colspan="10">No automation history recorded</td></tr>'}</tbody>
+            </table>
+        </div>
+    `;
+}
+
 async function loadAutomationStatus() {
     const resp = await fetch(`${BASE_PATH}/automation/status`, { cache: 'no-store' });
     if (!resp.ok) throw new Error(`status ${resp.status}`);
@@ -183,6 +240,8 @@ async function loadAutomationStatus() {
         ['input_path', esc(req.input_path)],
         ['output_path', esc(req.output_path)]
     ]);
+
+    renderHistory(data.automation_history || []);
 
     const sources = data.sources || {};
     const rows = Object.entries(sources).map(([name, cfg]) => `

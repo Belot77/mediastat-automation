@@ -151,12 +151,33 @@ testing in a safe non-library location.
 ## Automation status page
 
 Open `Automation` from the MediaStat header to view the current safe automation
-configuration and the most recent automation decision. The page shows whether
-automation is enabled, whether dry-run is active, whether a token is configured,
-source policy, and the last request/result summary.
+configuration, the most recent automation decision, and recent decision history.
+The page shows whether automation is enabled, whether dry-run is active, whether
+a token is configured, source policy, and the last request/result summary.
 
 The page never renders the token value. It only shows `token_configured` as
 `true` or `false`.
+
+## Automation history
+
+Every automation decision is appended to:
+
+```text
+/data/automation_history.jsonl
+```
+
+The file is JSON Lines format: one sanitized JSON object per line. Records include
+available fields such as timestamp, source, event, category, decision/result,
+dry-run state, queued/ignored state, job id, profile, post action, input path,
+output path, reason/error, warnings, and HTTP-style outcome.
+
+Tokens, request headers, secrets, and full raw request bodies are not stored. The
+Automation page reads a bounded recent view, currently the last 100 readable
+entries, and skips missing or partially unreadable history safely.
+
+Keep `dry_run: true`, `allow_arr_sidecar_output: false`, and `post_action: keep`
+for current Radarr/Sonarr testing. In dry-run mode the history shows the
+decisions MediaStat would make without queueing encode jobs.
 
 For direct HTTP checks, request:
 

@@ -12,6 +12,7 @@ import tempfile
 import time
 import platform
 import datetime
+from collections import deque
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import urllib.request
@@ -182,6 +183,8 @@ def _deep_merge_config(default: dict, override: object) -> dict:
 AUTOMATION_CONFIG: dict = _deep_merge_config(
     DEFAULT_AUTOMATION_CONFIG, _config.get("automation") or {}
 )
+AUTOMATION_HISTORY_PATH = Path("/data/automation_history.jsonl")
+AUTOMATION_HISTORY_LIMIT = 100
 
 # Optional TMDB API key — set tmdb_api_key in config.yaml to enable TMDB search
 TMDB_API_KEY: str = (_config.get("tmdb_api_key") or "").strip()
@@ -4012,6 +4015,79 @@ def _automation_source_policy() -> dict:
     return policies
 
 
+def _automation_history_warnings(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    if value:
+        return [str(value)]
+    return []
+
+
+def _sanitize_automation_history_record(record: object) -> dict | None:
+    if not isinstance(record, dict):
+        return None
+    reason = str(record.get("reason") or "")
+    error = str(record.get("error") or "")
+    return {
+        "timestamp": str(record.get("timestamp") or ""),
+        "source": str(record.get("source") or ""),
+        "event": str(record.get("event") or ""),
+        "category": str(record.get("category") or ""),
+        "decision": str(record.get("decision") or record.get("result") or ""),
+        "result": str(record.get("result") or record.get("decision") or ""),
+        "dry_run": bool(record.get("dry_run", False)),
+        "queued": bool(record.get("queued", False)),
+        "ignored": bool(record.get("ignored", False)),
+        "job_id": record.get("job_id") or None,
+        "profile": str(record.get("profile") or ""),
+        "post_action": str(record.get("post_action") or ""),
+        "input_path": str(record.get("input_path") or ""),
+        "output_path": str(record.get("output_path") or ""),
+        "error": error,
+        "reason": reason,
+        "warnings": _automation_history_warnings(record.get("warnings")),
+        "http_status": record.get("http_status"),
+        "http_outcome": str(record.get("http_outcome") or ""),
+    }
+
+
+def _append_automation_history(record: dict) -> None:
+    try:
+        AUTOMATION_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUTOMATION_HISTORY_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+    except Exception as exc:
+        log.warning("Automation history could not be written to %s: %s", AUTOMATION_HISTORY_PATH, exc)
+
+
+def _read_automation_history(limit: int = AUTOMATION_HISTORY_LIMIT) -> list[dict]:
+    if limit <= 0 or not AUTOMATION_HISTORY_PATH.exists():
+        return []
+
+    history = deque(maxlen=limit)
+    try:
+        with open(AUTOMATION_HISTORY_PATH, encoding="utf-8") as f:
+            for line_number, line in enumerate(f, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    log.warning(
+                        "Automation history ignored unreadable line %s in %s: %s",
+                        line_number, AUTOMATION_HISTORY_PATH, exc,
+                    )
+                    continue
+                clean = _sanitize_automation_history_record(record)
+                if clean is not None:
+                    history.append(clean)
+    except Exception as exc:
+        log.warning("Automation history could not be read from %s: %s", AUTOMATION_HISTORY_PATH, exc)
+        return list(reversed(history))
+    return list(reversed(history))
+
+
 def _automation_status_payload() -> dict:
     sources = _automation_source_policy()
     return {
@@ -4026,6 +4102,7 @@ def _automation_status_payload() -> dict:
         "last_automation_request": _AUTOMATION_LAST.get("request"),
         "last_automation_result": _AUTOMATION_LAST.get("result"),
         "last_automation_timestamp": _AUTOMATION_LAST.get("timestamp"),
+        "automation_history": _read_automation_history(AUTOMATION_HISTORY_LIMIT),
     }
 
 
@@ -4044,9 +4121,16 @@ def _remember_automation_request(**summary: object) -> None:
 
 
 def _remember_automation_result(decision: str, reason: str = "", **summary: object) -> None:
+    timestamp = _automation_timestamp()
+    error = str(summary.get("error") or "")
+    if decision == "rejected" and not error:
+        error = reason
     clean = {
+        "timestamp": timestamp,
         "decision": decision,
+        "result": decision,
         "reason": reason,
+        "error": error,
         "queued": bool(summary.get("queued", False)),
         "ignored": bool(summary.get("ignored", False)),
         "dry_run": bool(summary.get("dry_run", False)),
@@ -4058,15 +4142,25 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "post_action": str(summary.get("post_action") or ""),
         "input_path": str(summary.get("input_path") or ""),
         "output_path": str(summary.get("output_path") or ""),
-        "warnings": list(summary.get("warnings") or []),
+        "warnings": _automation_history_warnings(summary.get("warnings")),
+        "http_status": summary.get("http_status"),
+        "http_outcome": str(summary.get("http_outcome") or ""),
     }
     _AUTOMATION_LAST["result"] = clean
-    _AUTOMATION_LAST["timestamp"] = _automation_timestamp()
+    _AUTOMATION_LAST["timestamp"] = timestamp
+    _append_automation_history(clean)
 
 
 def _automation_reject(reason: str, status_code: int = 400, **context: object) -> None:
     safe_context = {k: v for k, v in context.items() if v not in (None, "")}
-    _remember_automation_result("rejected", reason, **safe_context)
+    safe_context.setdefault("dry_run", bool(AUTOMATION_CONFIG.get("dry_run", True)))
+    _remember_automation_result(
+        "rejected",
+        reason,
+        http_status=status_code,
+        http_outcome="error",
+        **safe_context,
+    )
     log.warning("Automation queue rejected: %s context=%s", reason, safe_context)
     raise HTTPException(
         status_code=status_code,
@@ -4112,7 +4206,13 @@ def _automation_response(
         decision = "accepted_dry_run"
     else:
         decision = "accepted"
-    _remember_automation_result(decision, reason, **payload)
+    _remember_automation_result(
+        decision,
+        reason,
+        http_status=200,
+        http_outcome="ok",
+        **payload,
+    )
     return payload
 
 
