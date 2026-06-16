@@ -64,13 +64,57 @@
         .source-table th, .source-table td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: top; }
         .source-table td { overflow-wrap: anywhere; word-break: break-word; }
         .source-table th { color: var(--muted); font-weight: 600; }
-        .history-table-wrap { width: 100%; overflow-x: auto; }
-        .history-table { width: 100%; min-width: 1040px; border-collapse: collapse; font-size: var(--fs-sm); }
-        .history-table th, .history-table td { border-bottom: 1px solid var(--border); padding: 7px 6px; text-align: left; vertical-align: top; }
-        .history-table th { color: var(--muted); font-weight: 600; }
-        .history-table td { overflow-wrap: anywhere; word-break: break-word; }
-        .history-table .path-cell { min-width: 190px; max-width: 280px; overflow-wrap: anywhere; word-break: break-word; }
-        .history-table .compact-cell { max-width: 140px; }
+        .history-list { display: grid; gap: 12px; }
+        .history-item {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.025);
+            padding: 13px;
+            min-width: 0;
+        }
+        .history-header {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px 16px;
+            align-items: flex-start;
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+            margin-bottom: 10px;
+        }
+        .history-meta { display: grid; gap: 4px; min-width: 0; }
+        .history-timestamp { color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+        .history-source { font-weight: 600; overflow-wrap: anywhere; word-break: break-word; }
+        .history-badges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; min-width: 0; }
+        .history-badge {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            color: var(--muted);
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            font-size: var(--fs-sm);
+            white-space: nowrap;
+        }
+        .history-badge.dry_run-true { color: var(--blue); border-color: var(--blue); }
+        .history-badge.queued-true { color: var(--green); border-color: var(--green); }
+        .history-badge.ignored-true { color: var(--yellow); border-color: var(--yellow); }
+        .history-body, .history-footer { display: grid; gap: 8px; min-width: 0; }
+        .history-footer {
+            border-top: 1px solid var(--border);
+            margin-top: 10px;
+            padding-top: 10px;
+        }
+        .history-field {
+            display: grid;
+            grid-template-columns: minmax(110px, 150px) minmax(0, 1fr);
+            gap: 8px 12px;
+            align-items: start;
+            min-width: 0;
+        }
+        .history-label { color: var(--muted); font-weight: 600; overflow-wrap: anywhere; }
+        .history-value { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+        .path-value { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
+        .history-empty { color: var(--muted); margin: 0; }
         .status-note { color: var(--muted); margin: 0 0 16px; }
         @media (max-width: 900px) {
             .automation-grid {
@@ -85,6 +129,9 @@
             main { padding: 0 12px 28px; }
             .automation-kv { grid-template-columns: 1fr; row-gap: 4px; }
             .automation-kv dd { margin-bottom: 8px; }
+            .history-header { display: grid; }
+            .history-badges { justify-content: flex-start; }
+            .history-field { grid-template-columns: 1fr; gap: 3px; }
         }
     </style>
 </head>
@@ -165,44 +212,79 @@ function compactSource(value) {
     return esc([value.source, value.event, value.category].filter(Boolean).join(' / '));
 }
 
+function classToken(value) {
+    return String(value || 'none').toLowerCase().replace(/[^a-z0-9_-]/g, '-');
+}
+
+function historyDecisionBadge(item) {
+    const decision = item.decision || item.result || 'none';
+    const labels = {
+        accepted_dry_run: 'ACCEPTED DRY-RUN',
+        rejected: 'ERROR',
+        ignored: 'IGNORED',
+        queued: 'QUEUED',
+        accepted: 'ACCEPTED'
+    };
+    return `<span class="decision-badge ${classToken(decision)}">${esc(labels[decision] || decision)}</span>`;
+}
+
+function flagBadge(label, value) {
+    const flag = boolText(value);
+    return `<span class="history-badge ${classToken(label)}-${flag}">${esc(label)} ${esc(flag)}</span>`;
+}
+
+function historyField(label, value, extraClass = '') {
+    const display = value ? esc(value) : '<span style="color:var(--muted)">none</span>';
+    const valueClass = extraClass ? `history-value ${extraClass}` : 'history-value';
+    return `
+        <div class="history-field">
+            <div class="history-label">${esc(label)}</div>
+            <div class="${valueClass}">${display}</div>
+        </div>
+    `;
+}
+
 function renderHistory(history) {
-    const rows = (Array.isArray(history) ? history : []).map(item => {
+    const items = Array.isArray(history) ? history : [];
+    if (!items.length) {
+        document.getElementById('automation-history').innerHTML =
+            '<p class="history-empty">No automation history recorded</p>';
+        return;
+    }
+
+    const cards = items.map(item => {
         const reason = item.error || item.reason || '';
+        const warnings = Array.isArray(item.warnings) ? item.warnings.filter(Boolean).join(', ') : '';
+        const source = compactSource(item) || '<span style="color:var(--muted)">none</span>';
+        const footer = [
+            reason ? historyField('error/reason', reason) : '',
+            warnings ? historyField('warnings', warnings) : ''
+        ].join('');
         return `
-            <tr>
-                <td>${esc(item.timestamp)}</td>
-                <td>${displayDecision(item.decision || item.result)}</td>
-                <td class="compact-cell">${compactSource(item)}</td>
-                <td>${esc(boolText(item.dry_run))}</td>
-                <td>${esc(boolText(item.queued))}</td>
-                <td>${esc(boolText(item.ignored))}</td>
-                <td class="compact-cell">${esc(item.profile)}</td>
-                <td class="path-cell">${esc(item.input_path)}</td>
-                <td class="path-cell">${esc(item.output_path)}</td>
-                <td class="compact-cell">${esc(reason)}</td>
-            </tr>
+            <article class="history-item">
+                <div class="history-header">
+                    <div class="history-meta">
+                        <div class="history-timestamp">${esc(item.timestamp)}</div>
+                        <div class="history-source">${source}</div>
+                    </div>
+                    <div class="history-badges">
+                        ${historyDecisionBadge(item)}
+                        ${flagBadge('dry_run', item.dry_run)}
+                        ${flagBadge('queued', item.queued)}
+                        ${flagBadge('ignored', item.ignored)}
+                    </div>
+                </div>
+                <div class="history-body">
+                    ${historyField('profile', item.profile)}
+                    ${historyField('input_path', item.input_path, 'path-value')}
+                    ${historyField('output_path', item.output_path, 'path-value')}
+                </div>
+                ${footer ? `<div class="history-footer">${footer}</div>` : ''}
+            </article>
         `;
     }).join('');
     document.getElementById('automation-history').innerHTML = `
-        <div class="history-table-wrap">
-            <table class="history-table">
-                <thead>
-                    <tr>
-                        <th>timestamp</th>
-                        <th>decision/result</th>
-                        <th>source/event/category</th>
-                        <th>dry_run</th>
-                        <th>queued</th>
-                        <th>ignored</th>
-                        <th>profile</th>
-                        <th>input_path</th>
-                        <th>output_path</th>
-                        <th>error/reason</th>
-                    </tr>
-                </thead>
-                <tbody>${rows || '<tr><td colspan="10">No automation history recorded</td></tr>'}</tbody>
-            </table>
-        </div>
+        <div class="history-list">${cards}</div>
     `;
 }
 
