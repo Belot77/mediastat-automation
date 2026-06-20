@@ -14,6 +14,8 @@ automation:
   token: "YOUR_AUTOMATION_TOKEN"
   dry_run: true
   allow_arr_sidecar_output: false
+  file_stability_check_enabled: true
+  file_stability_wait_seconds: 30
   default_profile: high_quality_hevc_qp18
   default_post_action: keep
 
@@ -178,6 +180,31 @@ entries, and skips missing or partially unreadable history safely.
 Keep `dry_run: true`, `allow_arr_sidecar_output: false`, and `post_action: keep`
 for current Radarr/Sonarr testing. In dry-run mode the history shows the
 decisions MediaStat would make without queueing encode jobs.
+
+## File stability guardrail
+
+Automation checks file stability before accepting a media file as processable.
+When `file_stability_check_enabled: true`, MediaStat records the input file size
+and modified time, waits `file_stability_wait_seconds`, then records size and
+modified time again. The file is stable only when both values are unchanged.
+
+The safety-first default wait is 30 seconds:
+
+```yaml
+automation:
+  file_stability_check_enabled: true
+  file_stability_wait_seconds: 30
+```
+
+For faster dry-run testing, temporarily lower `file_stability_wait_seconds` in a
+safe test environment. Keep `dry_run: true`; the stability check proves whether a
+future live queue would be safe without creating an encode job.
+
+Dry-run responses, Last Decision, and automation history include stability
+fields such as `file_stable`, `stability_check_enabled`,
+`stability_wait_seconds`, `size_before`, `size_after`, `mtime_before`,
+`mtime_after`, and `stability_reason`. If the file changes during the wait,
+MediaStat returns a file-unstable decision and does not queue anything.
 
 For direct HTTP checks, request:
 

@@ -1,6 +1,6 @@
 ---
 name: "MediaStat Automation Dev"
-version: "1.0.34-dev5"
+version: "1.0.34-dev6"
 slug: "mediastat_automation_dev"
 description: "Media browser, health checker and HandBrake transcoder for your library"
 url: "https://github.com/Belot77/mediastat-automation"
@@ -23,6 +23,8 @@ options:
     token: ""
     dry_run: true
     allow_arr_sidecar_output: false
+    file_stability_check_enabled: true
+    file_stability_wait_seconds: 30
     default_profile: high_quality_hevc_qp18
     default_post_action: keep
 
@@ -37,6 +39,8 @@ schema:
     token: str?
     dry_run: bool
     allow_arr_sidecar_output: bool
+    file_stability_check_enabled: bool
+    file_stability_wait_seconds: int
     default_profile: str
     default_post_action: list(keep)
 

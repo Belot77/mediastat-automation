@@ -66,6 +66,8 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
     "token": "",
     "dry_run": True,
     "allow_arr_sidecar_output": False,
+    "file_stability_check_enabled": True,
+    "file_stability_wait_seconds": 30,
     "default_profile": "high_quality_hevc_qp18",
     "default_post_action": "keep",
     "schedule": {
@@ -4023,6 +4025,82 @@ def _automation_history_warnings(value: object) -> list[str]:
     return []
 
 
+def _automation_bool_or_none(value: object) -> bool | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+        if lowered in ("false", "0", "no", "off"):
+            return False
+    return bool(value)
+
+
+def _automation_stability_wait_seconds() -> int:
+    try:
+        wait_seconds = int(AUTOMATION_CONFIG.get("file_stability_wait_seconds", 30))
+    except (TypeError, ValueError):
+        wait_seconds = 30
+    return max(0, wait_seconds)
+
+
+def _automation_mtime_iso(timestamp: float) -> str:
+    return datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).isoformat()
+
+
+async def _automation_file_stability(file_path: Path) -> dict:
+    enabled = bool(AUTOMATION_CONFIG.get("file_stability_check_enabled", True))
+    wait_seconds = _automation_stability_wait_seconds()
+    result = {
+        "file_stable": None,
+        "stability_check_enabled": enabled,
+        "stability_wait_seconds": wait_seconds,
+        "size_before": None,
+        "size_after": None,
+        "mtime_before": "",
+        "mtime_after": "",
+        "stability_reason": "",
+    }
+    if not enabled:
+        result["stability_reason"] = "file stability check disabled"
+        return result
+
+    try:
+        before = file_path.stat()
+    except FileNotFoundError:
+        result["file_stable"] = False
+        result["stability_reason"] = "path does not exist"
+        return result
+    except OSError as exc:
+        result["file_stable"] = False
+        result["stability_reason"] = f"could not stat file before stability check: {exc.strerror or exc.__class__.__name__}"
+        return result
+
+    result["size_before"] = before.st_size
+    result["mtime_before"] = _automation_mtime_iso(before.st_mtime)
+    if wait_seconds:
+        await asyncio.sleep(wait_seconds)
+
+    try:
+        after = file_path.stat()
+    except FileNotFoundError:
+        result["file_stable"] = False
+        result["stability_reason"] = "path disappeared during stability check"
+        return result
+    except OSError as exc:
+        result["file_stable"] = False
+        result["stability_reason"] = f"could not stat file after stability check: {exc.strerror or exc.__class__.__name__}"
+        return result
+
+    result["size_after"] = after.st_size
+    result["mtime_after"] = _automation_mtime_iso(after.st_mtime)
+    result["file_stable"] = before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
+    if not result["file_stable"]:
+        result["stability_reason"] = "file size or modified time changed during stability check"
+    return result
+
+
 def _sanitize_automation_history_record(record: object) -> dict | None:
     if not isinstance(record, dict):
         return None
@@ -4048,6 +4126,14 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         "warnings": _automation_history_warnings(record.get("warnings")),
         "http_status": record.get("http_status"),
         "http_outcome": str(record.get("http_outcome") or ""),
+        "file_stable": _automation_bool_or_none(record.get("file_stable")),
+        "stability_check_enabled": _automation_bool_or_none(record.get("stability_check_enabled")),
+        "stability_wait_seconds": record.get("stability_wait_seconds"),
+        "size_before": record.get("size_before"),
+        "size_after": record.get("size_after"),
+        "mtime_before": str(record.get("mtime_before") or ""),
+        "mtime_after": str(record.get("mtime_after") or ""),
+        "stability_reason": str(record.get("stability_reason") or ""),
     }
 
 
@@ -4094,6 +4180,8 @@ def _automation_status_payload() -> dict:
         "enabled": bool(AUTOMATION_CONFIG.get("enabled")),
         "dry_run": bool(AUTOMATION_CONFIG.get("dry_run", True)),
         "allow_arr_sidecar_output": bool(AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)),
+        "file_stability_check_enabled": bool(AUTOMATION_CONFIG.get("file_stability_check_enabled", True)),
+        "file_stability_wait_seconds": _automation_stability_wait_seconds(),
         "default_profile": AUTOMATION_CONFIG.get("default_profile"),
         "default_post_action": AUTOMATION_CONFIG.get("default_post_action"),
         "token_configured": bool(AUTOMATION_CONFIG.get("token")),
@@ -4123,7 +4211,7 @@ def _remember_automation_request(**summary: object) -> None:
 def _remember_automation_result(decision: str, reason: str = "", **summary: object) -> None:
     timestamp = _automation_timestamp()
     error = str(summary.get("error") or "")
-    if decision == "rejected" and not error:
+    if decision in ("rejected", "file_unstable") and not error:
         error = reason
     clean = {
         "timestamp": timestamp,
@@ -4145,17 +4233,25 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "warnings": _automation_history_warnings(summary.get("warnings")),
         "http_status": summary.get("http_status"),
         "http_outcome": str(summary.get("http_outcome") or ""),
+        "file_stable": _automation_bool_or_none(summary.get("file_stable")),
+        "stability_check_enabled": _automation_bool_or_none(summary.get("stability_check_enabled")),
+        "stability_wait_seconds": summary.get("stability_wait_seconds"),
+        "size_before": summary.get("size_before"),
+        "size_after": summary.get("size_after"),
+        "mtime_before": str(summary.get("mtime_before") or ""),
+        "mtime_after": str(summary.get("mtime_after") or ""),
+        "stability_reason": str(summary.get("stability_reason") or ""),
     }
     _AUTOMATION_LAST["result"] = clean
     _AUTOMATION_LAST["timestamp"] = timestamp
     _append_automation_history(clean)
 
 
-def _automation_reject(reason: str, status_code: int = 400, **context: object) -> None:
+def _automation_reject(reason: str, status_code: int = 400, decision: str = "rejected", **context: object) -> None:
     safe_context = {k: v for k, v in context.items() if v not in (None, "")}
     safe_context.setdefault("dry_run", bool(AUTOMATION_CONFIG.get("dry_run", True)))
     _remember_automation_result(
-        "rejected",
+        decision,
         reason,
         http_status=status_code,
         http_outcome="error",
@@ -4164,7 +4260,14 @@ def _automation_reject(reason: str, status_code: int = 400, **context: object) -
     log.warning("Automation queue rejected: %s context=%s", reason, safe_context)
     raise HTTPException(
         status_code=status_code,
-        detail={"error": reason, "queued": False, "ignored": False, **safe_context},
+        detail={
+            "error": reason,
+            "decision": decision,
+            "result": decision,
+            "queued": False,
+            "ignored": False,
+            **safe_context,
+        },
     )
 
 
@@ -4183,6 +4286,7 @@ def _automation_response(
     output_path: str | None,
     warnings: list[str],
     reason: str = "",
+    stability: dict | None = None,
 ) -> dict:
     payload = {
         "queued": queued,
@@ -4198,6 +4302,8 @@ def _automation_response(
         "output_path": output_path,
         "warnings": warnings,
     }
+    if stability:
+        payload.update(stability)
     if ignored:
         decision = "ignored"
     elif queued:
@@ -4206,6 +4312,8 @@ def _automation_response(
         decision = "accepted_dry_run"
     else:
         decision = "accepted"
+    payload["decision"] = decision
+    payload["result"] = decision
     _remember_automation_result(
         decision,
         reason,
@@ -4400,6 +4508,25 @@ async def automation_queue(request: Request):
         output_path=str(output_path), profile=profile_name, post_action=post_action,
     )
 
+    stability = await _automation_file_stability(file_path)
+    if stability.get("stability_check_enabled") and stability.get("file_stable") is False:
+        reason = stability.get("stability_reason") or "file is not stable"
+        warnings.append(str(reason))
+        _automation_reject(
+            "file is not stable",
+            status_code=409,
+            decision="file_unstable",
+            source=source,
+            event=event,
+            category=category,
+            profile=profile_name,
+            post_action=post_action,
+            input_path=str(file_path),
+            output_path=str(output_path),
+            warnings=warnings,
+            **stability,
+        )
+
     if (
         source in ("radarr", "sonarr")
         and not dry_run
@@ -4414,6 +4541,7 @@ async def automation_queue(request: Request):
             profile=profile_name,
             input_path=str(file_path),
             output_path=str(output_path),
+            **stability,
         )
 
     if dry_run:
@@ -4425,7 +4553,7 @@ async def automation_queue(request: Request):
             queued=False, ignored=False, dry_run=True, job_id=None,
             source=source, event=event, category=category, profile=profile_name,
             post_action="keep", input_path=str(file_path), output_path=str(output_path),
-            warnings=warnings,
+            warnings=warnings, stability=stability,
         )
 
     if not shutil.which("ffmpeg"):
@@ -4433,6 +4561,8 @@ async def automation_queue(request: Request):
             "ffmpeg not found in PATH",
             status_code=503,
             source=source, event=event, profile=profile_name, input_path=str(file_path),
+            output_path=str(output_path),
+            **stability,
         )
 
     job_id = _queue_file_encode(file_path, config)
@@ -4441,6 +4571,8 @@ async def automation_queue(request: Request):
             "encode job could not be queued",
             status_code=503,
             source=source, event=event, profile=profile_name, input_path=str(file_path),
+            output_path=str(output_path),
+            **stability,
         )
     await _save_encode_job(_encode_jobs[job_id])
     _enqueue_job(job_id)
@@ -4453,7 +4585,7 @@ async def automation_queue(request: Request):
         queued=True, ignored=False, dry_run=False, job_id=job_id,
         source=source, event=event, category=category, profile=profile_name,
         post_action="keep", input_path=str(file_path), output_path=queued_output,
-        warnings=warnings,
+        warnings=warnings, stability=stability,
     )
 
 

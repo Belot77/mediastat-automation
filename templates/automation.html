@@ -57,6 +57,7 @@
         }
         .decision-badge.accepted_dry_run { color: var(--blue); border-color: var(--blue); }
         .decision-badge.rejected { color: var(--red); border-color: var(--red); }
+        .decision-badge.file_unstable { color: var(--red); border-color: var(--red); }
         .decision-badge.ignored { color: var(--yellow); border-color: var(--yellow); }
         .decision-badge.queued { color: var(--green); border-color: var(--green); }
         .source-table-wrap { width: 100%; overflow-x: auto; }
@@ -98,6 +99,8 @@
         .history-badge.dry_run-true { color: var(--blue); border-color: var(--blue); }
         .history-badge.queued-true { color: var(--green); border-color: var(--green); }
         .history-badge.ignored-true { color: var(--yellow); border-color: var(--yellow); }
+        .history-badge.file_stable-true { color: var(--green); border-color: var(--green); }
+        .history-badge.file_stable-false { color: var(--red); border-color: var(--red); }
         .history-body, .history-footer { display: grid; gap: 8px; min-width: 0; }
         .history-footer {
             border-top: 1px solid var(--border);
@@ -181,8 +184,27 @@ function esc(value) {
     }[ch]));
 }
 
+function boolValue(value) {
+    if (typeof value === 'string') {
+        return ['true', '1', 'yes', 'on'].includes(value.trim().toLowerCase());
+    }
+    return Boolean(value);
+}
+
 function boolText(value) {
-    return value ? 'true' : 'false';
+    return boolValue(value) ? 'true' : 'false';
+}
+
+function isBlank(value) {
+    return value === null || value === undefined || value === '';
+}
+
+function displayValue(value) {
+    return isBlank(value) ? '<span style="color:var(--muted)">none</span>' : esc(value);
+}
+
+function optionalBoolText(value) {
+    return isBlank(value) ? '' : boolText(value);
 }
 
 function addRows(el, rows) {
@@ -195,6 +217,7 @@ function displayDecision(decision) {
     const labels = {
         accepted_dry_run: 'Accepted dry-run',
         rejected: 'Rejected',
+        file_unstable: 'File unstable',
         ignored: 'Ignored',
         queued: 'Queued',
         accepted: 'Accepted'
@@ -220,6 +243,7 @@ function historyDecisionBadge(item) {
     const decision = item.decision || item.result || 'none';
     const labels = {
         accepted_dry_run: 'ACCEPTED DRY-RUN',
+        file_unstable: 'FILE UNSTABLE',
         rejected: 'ERROR',
         ignored: 'IGNORED',
         queued: 'QUEUED',
@@ -233,15 +257,36 @@ function flagBadge(label, value) {
     return `<span class="history-badge ${classToken(label)}-${flag}">${esc(label)} ${esc(flag)}</span>`;
 }
 
+function optionalFlagBadge(label, value) {
+    return isBlank(value) ? '' : flagBadge(label, value);
+}
+
 function historyField(label, value, extraClass = '') {
-    const display = value ? esc(value) : '<span style="color:var(--muted)">none</span>';
     const valueClass = extraClass ? `history-value ${extraClass}` : 'history-value';
     return `
         <div class="history-field">
             <div class="history-label">${esc(label)}</div>
-            <div class="${valueClass}">${display}</div>
+            <div class="${valueClass}">${displayValue(value)}</div>
         </div>
     `;
+}
+
+function hasStability(item) {
+    return !isBlank(item.file_stable) ||
+        !isBlank(item.stability_check_enabled) ||
+        !isBlank(item.stability_wait_seconds);
+}
+
+function stabilitySummary(item) {
+    if (!hasStability(item)) return '';
+    const parts = [
+        `enabled ${optionalBoolText(item.stability_check_enabled)}`,
+        `wait ${displayValue(item.stability_wait_seconds)}s`
+    ];
+    if (!isBlank(item.file_stable)) {
+        parts.push(`stable ${boolText(item.file_stable)}`);
+    }
+    return parts.join(' / ');
 }
 
 function renderHistory(history) {
@@ -258,6 +303,7 @@ function renderHistory(history) {
         const source = compactSource(item) || '<span style="color:var(--muted)">none</span>';
         const footer = [
             reason ? historyField('error/reason', reason) : '',
+            item.stability_reason ? historyField('stability_reason', item.stability_reason) : '',
             warnings ? historyField('warnings', warnings) : ''
         ].join('');
         return `
@@ -269,6 +315,7 @@ function renderHistory(history) {
                     </div>
                     <div class="history-badges">
                         ${historyDecisionBadge(item)}
+                        ${optionalFlagBadge('file_stable', item.file_stable)}
                         ${flagBadge('dry_run', item.dry_run)}
                         ${flagBadge('queued', item.queued)}
                         ${flagBadge('ignored', item.ignored)}
@@ -276,6 +323,7 @@ function renderHistory(history) {
                 </div>
                 <div class="history-body">
                     ${historyField('profile', item.profile)}
+                    ${hasStability(item) ? historyField('file_stability', stabilitySummary(item)) : ''}
                     ${historyField('input_path', item.input_path, 'path-value')}
                     ${historyField('output_path', item.output_path, 'path-value')}
                 </div>
@@ -297,6 +345,8 @@ async function loadAutomationStatus() {
         ['enabled', esc(boolText(data.enabled))],
         ['dry_run', esc(boolText(data.dry_run))],
         ['allow_arr_sidecar_output', esc(boolText(data.allow_arr_sidecar_output))],
+        ['file_stability_check_enabled', esc(boolText(data.file_stability_check_enabled))],
+        ['file_stability_wait_seconds', esc(data.file_stability_wait_seconds)],
         ['default_profile', esc(data.default_profile)],
         ['default_post_action', esc(data.default_post_action)],
         ['token_configured', esc(boolText(data.token_configured))],
@@ -304,6 +354,16 @@ async function loadAutomationStatus() {
     ]);
 
     const result = data.last_automation_result || {};
+    const stabilityRows = hasStability(result) ? [
+        ['file_stable', esc(optionalBoolText(result.file_stable))],
+        ['stability_check_enabled', esc(optionalBoolText(result.stability_check_enabled))],
+        ['stability_wait_seconds', esc(result.stability_wait_seconds)],
+        ['size_before', esc(result.size_before)],
+        ['size_after', esc(result.size_after)],
+        ['mtime_before', esc(result.mtime_before)],
+        ['mtime_after', esc(result.mtime_after)],
+        ['stability_reason', esc(result.stability_reason)]
+    ] : [];
     addRows(document.getElementById('automation-result'), [
         ['decision', displayDecision(result.decision)],
         ['reason', esc(result.reason)],
@@ -311,6 +371,7 @@ async function loadAutomationStatus() {
         ['profile/post_action', esc([result.profile, result.post_action].filter(Boolean).join(' / '))],
         ['input_path', esc(result.input_path)],
         ['output_path', esc(result.output_path)],
+        ...stabilityRows,
         ['job_id', esc(result.job_id)],
         ['timestamp', esc(data.last_automation_timestamp)]
     ]);
