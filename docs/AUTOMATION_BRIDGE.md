@@ -233,6 +233,22 @@ Raw byte values such as `size_before` and `size_after` remain in the JSON
 response and history. The Automation page prefers `size_before_human` and
 `size_after_human` for readability.
 
+## Job preview
+
+Accepted dry-run automation requests include a job preview so the response,
+Last Decision, and Recent Automation History show what would happen later if live
+automation queueing were enabled.
+
+Preview fields include `would_queue`, `queue_blocked_by`, `preview_status`,
+planned source/event/profile/post action, planned input/output paths, and the
+automation schedule window/status. In dry-run mode, a stable accepted request
+uses `would_queue: true`, keeps `queued: false`, keeps `job_id: null`, and sets
+`queue_blocked_by: "dry_run"`.
+
+Unstable files use `would_queue: false` and `queue_blocked_by: "file_unstable"`.
+Ignored or rejected requests remain non-queueing decisions. The preview does not
+create directories, start jobs, encode files, or change scheduler behaviour.
+
 For direct HTTP checks, request:
 
 ```bash

@@ -101,6 +101,8 @@
         .history-badge.ignored-true { color: var(--yellow); border-color: var(--yellow); }
         .history-badge.file_stable-true { color: var(--green); border-color: var(--green); }
         .history-badge.file_stable-false { color: var(--red); border-color: var(--red); }
+        .history-badge.would_queue-true { color: var(--green); border-color: var(--green); }
+        .history-badge.would_queue-false { color: var(--muted); border-color: var(--border); }
         .history-body, .history-footer { display: grid; gap: 8px; min-width: 0; }
         .history-footer {
             border-top: 1px solid var(--border);
@@ -210,6 +212,36 @@ function optionalBoolText(value) {
 function sizeValue(item, key) {
     const human = item[`${key}_human`];
     return isBlank(human) ? item[key] : human;
+}
+
+function previewValue(item, key) {
+    const preview = item.job_preview || {};
+    return isBlank(item[key]) ? preview[key] : item[key];
+}
+
+function hasPreview(item) {
+    return !isBlank(previewValue(item, 'would_queue')) ||
+        !isBlank(previewValue(item, 'queue_blocked_by')) ||
+        !isBlank(previewValue(item, 'preview_status'));
+}
+
+function previewSummary(item) {
+    if (!hasPreview(item)) return '';
+    const parts = [];
+    const wouldQueue = previewValue(item, 'would_queue');
+    const blockedBy = previewValue(item, 'queue_blocked_by');
+    const status = previewValue(item, 'preview_status');
+    const scheduleOpen = previewValue(item, 'schedule_currently_open');
+    const plannedSource = [previewValue(item, 'planned_source'), previewValue(item, 'planned_event')].filter(v => !isBlank(v)).join(' / ');
+    const plannedProfile = [previewValue(item, 'planned_profile'), previewValue(item, 'planned_post_action')].filter(v => !isBlank(v)).join(' / ');
+    if (!isBlank(wouldQueue)) parts.push(`would_queue ${boolText(wouldQueue)}`);
+    if (!isBlank(blockedBy)) parts.push(`blocked_by ${blockedBy}`);
+    if (!isBlank(status)) parts.push(`status ${status}`);
+    if (!isBlank(previewValue(item, 'schedule_window'))) parts.push(`schedule ${previewValue(item, 'schedule_window')}`);
+    if (!isBlank(scheduleOpen)) parts.push(`open ${boolText(scheduleOpen)}`);
+    if (plannedSource) parts.push(`planned ${plannedSource}`);
+    if (plannedProfile) parts.push(plannedProfile);
+    return parts.join(' / ');
 }
 
 function addRows(el, rows) {
@@ -325,6 +357,7 @@ function renderHistory(history) {
                     </div>
                     <div class="history-badges">
                         ${historyDecisionBadge(item)}
+                        ${optionalFlagBadge('would_queue', previewValue(item, 'would_queue'))}
                         ${optionalFlagBadge('file_stable', item.file_stable)}
                         ${flagBadge('dry_run', item.dry_run)}
                         ${flagBadge('queued', item.queued)}
@@ -333,6 +366,7 @@ function renderHistory(history) {
                 </div>
                 <div class="history-body">
                     ${historyField('profile', item.profile)}
+                    ${hasPreview(item) ? historyField('job_preview', previewSummary(item)) : ''}
                     ${hasStability(item) ? historyField('file_stability', stabilitySummary(item)) : ''}
                     ${historyField('input_path', item.input_path, 'path-value')}
                     ${historyField('output_path', item.output_path, 'path-value')}
@@ -366,6 +400,20 @@ async function loadAutomationStatus() {
     ]);
 
     const result = data.last_automation_result || {};
+    const previewRows = hasPreview(result) ? [
+        ['job_preview', esc(previewSummary(result))],
+        ['would_queue', esc(optionalBoolText(previewValue(result, 'would_queue')))],
+        ['queue_blocked_by', esc(previewValue(result, 'queue_blocked_by'))],
+        ['preview_status', esc(previewValue(result, 'preview_status'))],
+        ['schedule_enabled', esc(optionalBoolText(previewValue(result, 'schedule_enabled')))],
+        ['schedule_window', esc(previewValue(result, 'schedule_window'))],
+        ['schedule_currently_open', esc(optionalBoolText(previewValue(result, 'schedule_currently_open')))],
+        ['schedule_reason', esc(previewValue(result, 'schedule_reason'))],
+        ['planned_source/event', esc([previewValue(result, 'planned_source'), previewValue(result, 'planned_event')].filter(v => !isBlank(v)).join(' / '))],
+        ['planned_profile/post_action', esc([previewValue(result, 'planned_profile'), previewValue(result, 'planned_post_action')].filter(v => !isBlank(v)).join(' / '))],
+        ['planned_input_path', esc(previewValue(result, 'planned_input_path'))],
+        ['planned_output_path', esc(previewValue(result, 'planned_output_path'))]
+    ] : [];
     const stabilityRows = hasStability(result) ? [
         ['file_stable', esc(optionalBoolText(result.file_stable))],
         ['stability_check_enabled', esc(optionalBoolText(result.stability_check_enabled))],
@@ -383,6 +431,7 @@ async function loadAutomationStatus() {
         ['profile/post_action', esc([result.profile, result.post_action].filter(Boolean).join(' / '))],
         ['input_path', esc(result.input_path)],
         ['output_path', esc(result.output_path)],
+        ...previewRows,
         ...stabilityRows,
         ['job_id', esc(result.job_id)],
         ['timestamp', esc(data.last_automation_timestamp)]

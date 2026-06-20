@@ -4083,6 +4083,23 @@ def _automation_human_size(value: object) -> str:
     return f"{amount:.2f} {units[unit_index]}"
 
 
+_AUTOMATION_PREVIEW_KEYS = (
+    "would_queue",
+    "queue_blocked_by",
+    "preview_status",
+    "schedule_enabled",
+    "schedule_window",
+    "schedule_currently_open",
+    "schedule_reason",
+    "planned_input_path",
+    "planned_output_path",
+    "planned_profile",
+    "planned_post_action",
+    "planned_source",
+    "planned_event",
+)
+
+
 def _automation_bool_or_none(value: object) -> bool | None:
     if value in (None, ""):
         return None
@@ -4093,6 +4110,103 @@ def _automation_bool_or_none(value: object) -> bool | None:
         if lowered in ("false", "0", "no", "off"):
             return False
     return bool(value)
+
+
+def _automation_schedule_window(schedule: dict) -> str:
+    start = str(schedule.get("start") or "").strip()
+    end = str(schedule.get("end") or "").strip()
+    if start and end:
+        return f"{start}-{end}"
+    if start:
+        return f"{start}-"
+    if end:
+        return f"-{end}"
+    return ""
+
+
+def _automation_schedule_preview() -> dict:
+    schedule = AUTOMATION_CONFIG.get("schedule") or {}
+    if not isinstance(schedule, dict):
+        schedule = {}
+    enabled = bool(schedule.get("enabled", False))
+    schedule_window = _automation_schedule_window(schedule)
+    if enabled:
+        currently_open = _schedule_active(schedule)
+        schedule_reason = "automation schedule window is open" if currently_open else "automation schedule window is closed"
+    else:
+        currently_open = None
+        schedule_reason = "automation schedule is disabled"
+    return {
+        "schedule_enabled": enabled,
+        "schedule_window": schedule_window,
+        "schedule_currently_open": currently_open,
+        "schedule_reason": schedule_reason,
+    }
+
+
+def _automation_job_preview(
+    *,
+    would_queue: bool,
+    queue_blocked_by: str,
+    preview_status: str,
+    source: str,
+    event: str,
+    profile: str,
+    post_action: str,
+    input_path: str,
+    output_path: str | None,
+) -> dict:
+    preview = {
+        "would_queue": bool(would_queue),
+        "queue_blocked_by": queue_blocked_by,
+        "preview_status": preview_status,
+        "planned_input_path": input_path,
+        "planned_output_path": str(output_path or ""),
+        "planned_profile": profile,
+        "planned_post_action": post_action,
+        "planned_source": source,
+        "planned_event": event,
+    }
+    preview.update(_automation_schedule_preview())
+    return preview
+
+
+def _automation_preview_from_record(record: dict) -> dict:
+    nested = record.get("job_preview")
+    if not isinstance(nested, dict):
+        nested = {}
+    has_preview = any(key in record for key in _AUTOMATION_PREVIEW_KEYS) or bool(nested)
+    if not has_preview:
+        return {}
+
+    def _preview_value(key: str) -> object:
+        if key in record:
+            return record.get(key)
+        return nested.get(key)
+
+    return {
+        "would_queue": _automation_bool_or_none(_preview_value("would_queue")),
+        "queue_blocked_by": str(_preview_value("queue_blocked_by") or ""),
+        "preview_status": str(_preview_value("preview_status") or ""),
+        "schedule_enabled": _automation_bool_or_none(_preview_value("schedule_enabled")),
+        "schedule_window": str(_preview_value("schedule_window") or ""),
+        "schedule_currently_open": _automation_bool_or_none(_preview_value("schedule_currently_open")),
+        "schedule_reason": str(_preview_value("schedule_reason") or ""),
+        "planned_input_path": str(_preview_value("planned_input_path") or ""),
+        "planned_output_path": str(_preview_value("planned_output_path") or ""),
+        "planned_profile": str(_preview_value("planned_profile") or ""),
+        "planned_post_action": str(_preview_value("planned_post_action") or ""),
+        "planned_source": str(_preview_value("planned_source") or ""),
+        "planned_event": str(_preview_value("planned_event") or ""),
+    }
+
+
+def _automation_attach_preview(payload: dict, preview: dict | None) -> None:
+    if not preview:
+        return
+    clean_preview = _automation_preview_from_record(preview)
+    payload.update(clean_preview)
+    payload["job_preview"] = clean_preview
 
 
 def _automation_stability_wait_seconds() -> int:
@@ -4168,7 +4282,7 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         return None
     reason = str(record.get("reason") or "")
     error = str(record.get("error") or "")
-    return {
+    clean = {
         "timestamp": str(record.get("timestamp") or ""),
         "source": str(record.get("source") or ""),
         "event": str(record.get("event") or ""),
@@ -4199,6 +4313,8 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         "mtime_after": str(record.get("mtime_after") or ""),
         "stability_reason": str(record.get("stability_reason") or ""),
     }
+    _automation_attach_preview(clean, _automation_preview_from_record(record))
+    return clean
 
 
 def _append_automation_history(record: dict) -> None:
@@ -4310,14 +4426,22 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "mtime_after": str(summary.get("mtime_after") or ""),
         "stability_reason": str(summary.get("stability_reason") or ""),
     }
+    _automation_attach_preview(clean, _automation_preview_from_record(summary))
     _AUTOMATION_LAST["result"] = clean
     _AUTOMATION_LAST["timestamp"] = timestamp
     _append_automation_history(clean)
 
 
-def _automation_reject(reason: str, status_code: int = 400, decision: str = "rejected", **context: object) -> None:
+def _automation_reject(
+    reason: str,
+    status_code: int = 400,
+    decision: str = "rejected",
+    preview: dict | None = None,
+    **context: object,
+) -> None:
     safe_context = {k: v for k, v in context.items() if v not in (None, "")}
     safe_context.setdefault("dry_run", bool(AUTOMATION_CONFIG.get("dry_run", True)))
+    _automation_attach_preview(safe_context, preview)
     _remember_automation_result(
         decision,
         reason,
@@ -4355,6 +4479,7 @@ def _automation_response(
     warnings: list[str],
     reason: str = "",
     stability: dict | None = None,
+    preview: dict | None = None,
 ) -> dict:
     payload = {
         "queued": queued,
@@ -4380,8 +4505,34 @@ def _automation_response(
         decision = "accepted_dry_run"
     else:
         decision = "accepted"
+    if preview is None:
+        if ignored:
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="ignored",
+                preview_status="ignored",
+                source=source,
+                event=event,
+                profile=profile,
+                post_action=post_action,
+                input_path=input_path,
+                output_path=output_path,
+            )
+        elif queued:
+            preview = _automation_job_preview(
+                would_queue=True,
+                queue_blocked_by="",
+                preview_status="queued",
+                source=source,
+                event=event,
+                profile=profile,
+                post_action=post_action,
+                input_path=input_path,
+                output_path=output_path,
+            )
     payload["decision"] = decision
     payload["result"] = decision
+    _automation_attach_preview(payload, preview)
     history_payload = {k: v for k, v in payload.items() if k not in ("decision", "result")}
     _remember_automation_result(
         decision,
@@ -4581,6 +4732,17 @@ async def automation_queue(request: Request):
     if stability.get("stability_check_enabled") and stability.get("file_stable") is False:
         reason = stability.get("stability_reason") or "file is not stable"
         warnings.append(str(reason))
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by="file_unstable",
+            preview_status="blocked_file_unstable",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action=post_action,
+            input_path=str(file_path),
+            output_path=str(output_path),
+        )
         _automation_reject(
             "file is not stable",
             status_code=409,
@@ -4593,6 +4755,7 @@ async def automation_queue(request: Request):
             input_path=str(file_path),
             output_path=str(output_path),
             warnings=warnings,
+            preview=preview,
             **stability,
         )
 
@@ -4614,6 +4777,17 @@ async def automation_queue(request: Request):
         )
 
     if dry_run:
+        preview = _automation_job_preview(
+            would_queue=True,
+            queue_blocked_by="dry_run",
+            preview_status="would_queue",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=str(output_path),
+        )
         log.info(
             "Automation dry-run accepted: source=%s event=%s category=%s profile=%s input=%s output=%s",
             source, event, category, profile_name, file_path, output_path,
@@ -4622,7 +4796,7 @@ async def automation_queue(request: Request):
             queued=False, ignored=False, dry_run=True, job_id=None,
             source=source, event=event, category=category, profile=profile_name,
             post_action="keep", input_path=str(file_path), output_path=str(output_path),
-            warnings=warnings, stability=stability,
+            warnings=warnings, stability=stability, preview=preview,
         )
 
     if not shutil.which("ffmpeg"):
