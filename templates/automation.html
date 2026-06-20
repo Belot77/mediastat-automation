@@ -207,6 +207,11 @@ function optionalBoolText(value) {
     return isBlank(value) ? '' : boolText(value);
 }
 
+function sizeValue(item, key) {
+    const human = item[`${key}_human`];
+    return isBlank(human) ? item[key] : human;
+}
+
 function addRows(el, rows) {
     el.innerHTML = rows.map(([label, value]) =>
         `<dt>${esc(label)}</dt><dd>${value || '<span style="color:var(--muted)">none</span>'}</dd>`
@@ -286,6 +291,11 @@ function stabilitySummary(item) {
     if (!isBlank(item.file_stable)) {
         parts.push(`stable ${boolText(item.file_stable)}`);
     }
+    const sizeBefore = sizeValue(item, 'size_before');
+    const sizeAfter = sizeValue(item, 'size_after');
+    if (!isBlank(sizeBefore) || !isBlank(sizeAfter)) {
+        parts.push(`size ${isBlank(sizeBefore) ? 'none' : sizeBefore} -> ${isBlank(sizeAfter) ? 'none' : sizeAfter}`);
+    }
     return parts.join(' / ');
 }
 
@@ -347,6 +357,8 @@ async function loadAutomationStatus() {
         ['allow_arr_sidecar_output', esc(boolText(data.allow_arr_sidecar_output))],
         ['file_stability_check_enabled', esc(boolText(data.file_stability_check_enabled))],
         ['file_stability_wait_seconds', esc(data.file_stability_wait_seconds)],
+        ['review_output_enabled', esc(boolText(data.review_output_enabled))],
+        ['review_output_root', esc(data.review_output_root)],
         ['default_profile', esc(data.default_profile)],
         ['default_post_action', esc(data.default_post_action)],
         ['token_configured', esc(boolText(data.token_configured))],
@@ -358,8 +370,8 @@ async function loadAutomationStatus() {
         ['file_stable', esc(optionalBoolText(result.file_stable))],
         ['stability_check_enabled', esc(optionalBoolText(result.stability_check_enabled))],
         ['stability_wait_seconds', esc(result.stability_wait_seconds)],
-        ['size_before', esc(result.size_before)],
-        ['size_after', esc(result.size_after)],
+        ['size_before', esc(sizeValue(result, 'size_before'))],
+        ['size_after', esc(sizeValue(result, 'size_after'))],
         ['mtime_before', esc(result.mtime_before)],
         ['mtime_after', esc(result.mtime_after)],
         ['stability_reason', esc(result.stability_reason)]

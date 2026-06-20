@@ -16,6 +16,8 @@ automation:
   allow_arr_sidecar_output: false
   file_stability_check_enabled: true
   file_stability_wait_seconds: 30
+  review_output_enabled: true
+  review_output_root: "/media/mediastat-review"
   default_profile: high_quality_hevc_qp18
   default_post_action: keep
 
@@ -171,7 +173,8 @@ Every automation decision is appended to:
 The file is JSON Lines format: one sanitized JSON object per line. Records include
 available fields such as timestamp, source, event, category, decision/result,
 dry-run state, queued/ignored state, job id, profile, post action, input path,
-output path, reason/error, warnings, and HTTP-style outcome.
+output path, raw file sizes, human-readable file sizes, reason/error, warnings,
+and HTTP-style outcome.
 
 Tokens, request headers, secrets, and full raw request bodies are not stored. The
 Automation page reads a bounded recent view, currently the last 100 readable
@@ -205,6 +208,30 @@ fields such as `file_stable`, `stability_check_enabled`,
 `stability_wait_seconds`, `size_before`, `size_after`, `mtime_before`,
 `mtime_after`, and `stability_reason`. If the file changes during the wait,
 MediaStat returns a file-unstable decision and does not queue anything.
+
+## Review output path
+
+Automation plans output into a review/staging area instead of beside the imported
+movie or episode file. With the default automation settings:
+
+```yaml
+automation:
+  review_output_enabled: true
+  review_output_root: "/media/mediastat-review"
+```
+
+MediaStat keeps the normal encoded filename, preserves useful relative library
+folders when possible, and places the planned output under the review root. For
+example, an input under `/media/movies/...` plans output under
+`/media/mediastat-review/movies/...`.
+
+The original media file remains untouched. The review output path is intended to
+stay outside Radarr, Sonarr, Plex, or other live library folders while automation
+is being tested. MediaStat does not create review directories during dry-run.
+
+Raw byte values such as `size_before` and `size_after` remain in the JSON
+response and history. The Automation page prefers `size_before_human` and
+`size_after_human` for readability.
 
 For direct HTTP checks, request:
 

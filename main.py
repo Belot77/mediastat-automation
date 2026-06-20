@@ -68,6 +68,8 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
     "allow_arr_sidecar_output": False,
     "file_stability_check_enabled": True,
     "file_stability_wait_seconds": 30,
+    "review_output_enabled": True,
+    "review_output_root": "/media/mediastat-review",
     "default_profile": "high_quality_hevc_qp18",
     "default_post_action": "keep",
     "schedule": {
@@ -3974,9 +3976,45 @@ def _encode_output_candidate(file_path: Path, config: dict) -> Path:
     return candidate
 
 
-def _queue_file_encode(file_path: Path, config: dict) -> str | None:
+def _automation_relative_media_parent(file_path: Path) -> Path:
+    resolved = file_path.expanduser().resolve()
+    real = Path(os.path.realpath(resolved))
+    matches: list[Path] = []
+    for root in ALLOWED_ROOTS:
+        root_resolved = root.expanduser().resolve()
+        root_real = Path(os.path.realpath(root_resolved))
+        if resolved == root_resolved or resolved.is_relative_to(root_resolved):
+            matches.append(resolved.relative_to(root_resolved).parent)
+        elif real == root_real or real.is_relative_to(root_real):
+            matches.append(real.relative_to(root_real).parent)
+    if not matches:
+        return Path()
+    return max(matches, key=lambda p: len(p.parts))
+
+
+def _automation_output_candidate(file_path: Path, config: dict) -> Path:
+    normal_candidate = _encode_output_candidate(file_path, config)
+    if not AUTOMATION_CONFIG.get("review_output_enabled", True):
+        return normal_candidate
+    review_root_value = str(AUTOMATION_CONFIG.get("review_output_root") or "").strip()
+    if not review_root_value:
+        return normal_candidate
+
+    review_root = Path(review_root_value).expanduser()
+    relative_parent = _automation_relative_media_parent(file_path)
+    base_candidate = review_root / relative_parent / normal_candidate.name
+    candidate = base_candidate
+    active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
+    counter = 2
+    while str(candidate) in active_outputs or candidate.exists():
+        candidate = base_candidate.with_name(f"{base_candidate.stem}-{counter}{base_candidate.suffix}")
+        counter += 1
+    return candidate
+
+
+def _queue_file_encode(file_path: Path, config: dict, output_path: Path | None = None) -> str | None:
     """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
-    candidate = _encode_output_candidate(file_path, config)
+    candidate = output_path or _encode_output_candidate(file_path, config)
     job_id = secrets.token_hex(8)
     job = EncodeJob(job_id, str(file_path), str(candidate), config)
     _encode_jobs[job_id] = job
@@ -4025,6 +4063,26 @@ def _automation_history_warnings(value: object) -> list[str]:
     return []
 
 
+def _automation_human_size(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    try:
+        size = int(value)
+    except (TypeError, ValueError):
+        return ""
+    if size < 0:
+        return ""
+    units = ["B", "KB", "MB", "GB", "TB", "PB"]
+    amount = float(size)
+    unit_index = 0
+    while amount >= 1024 and unit_index < len(units) - 1:
+        amount /= 1024
+        unit_index += 1
+    if unit_index == 0:
+        return f"{size} B"
+    return f"{amount:.2f} {units[unit_index]}"
+
+
 def _automation_bool_or_none(value: object) -> bool | None:
     if value in (None, ""):
         return None
@@ -4058,6 +4116,8 @@ async def _automation_file_stability(file_path: Path) -> dict:
         "stability_wait_seconds": wait_seconds,
         "size_before": None,
         "size_after": None,
+        "size_before_human": "",
+        "size_after_human": "",
         "mtime_before": "",
         "mtime_after": "",
         "stability_reason": "",
@@ -4078,6 +4138,7 @@ async def _automation_file_stability(file_path: Path) -> dict:
         return result
 
     result["size_before"] = before.st_size
+    result["size_before_human"] = _automation_human_size(before.st_size)
     result["mtime_before"] = _automation_mtime_iso(before.st_mtime)
     if wait_seconds:
         await asyncio.sleep(wait_seconds)
@@ -4094,6 +4155,7 @@ async def _automation_file_stability(file_path: Path) -> dict:
         return result
 
     result["size_after"] = after.st_size
+    result["size_after_human"] = _automation_human_size(after.st_size)
     result["mtime_after"] = _automation_mtime_iso(after.st_mtime)
     result["file_stable"] = before.st_size == after.st_size and before.st_mtime_ns == after.st_mtime_ns
     if not result["file_stable"]:
@@ -4131,6 +4193,8 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         "stability_wait_seconds": record.get("stability_wait_seconds"),
         "size_before": record.get("size_before"),
         "size_after": record.get("size_after"),
+        "size_before_human": str(record.get("size_before_human") or _automation_human_size(record.get("size_before"))),
+        "size_after_human": str(record.get("size_after_human") or _automation_human_size(record.get("size_after"))),
         "mtime_before": str(record.get("mtime_before") or ""),
         "mtime_after": str(record.get("mtime_after") or ""),
         "stability_reason": str(record.get("stability_reason") or ""),
@@ -4182,6 +4246,8 @@ def _automation_status_payload() -> dict:
         "allow_arr_sidecar_output": bool(AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)),
         "file_stability_check_enabled": bool(AUTOMATION_CONFIG.get("file_stability_check_enabled", True)),
         "file_stability_wait_seconds": _automation_stability_wait_seconds(),
+        "review_output_enabled": bool(AUTOMATION_CONFIG.get("review_output_enabled", True)),
+        "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
         "default_profile": AUTOMATION_CONFIG.get("default_profile"),
         "default_post_action": AUTOMATION_CONFIG.get("default_post_action"),
         "token_configured": bool(AUTOMATION_CONFIG.get("token")),
@@ -4238,6 +4304,8 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "stability_wait_seconds": summary.get("stability_wait_seconds"),
         "size_before": summary.get("size_before"),
         "size_after": summary.get("size_after"),
+        "size_before_human": str(summary.get("size_before_human") or _automation_human_size(summary.get("size_before"))),
+        "size_after_human": str(summary.get("size_after_human") or _automation_human_size(summary.get("size_after"))),
         "mtime_before": str(summary.get("mtime_before") or ""),
         "mtime_after": str(summary.get("mtime_after") or ""),
         "stability_reason": str(summary.get("stability_reason") or ""),
@@ -4502,7 +4570,7 @@ async def automation_queue(request: Request):
         "automation_category": category,
         "automation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     })
-    output_path = _encode_output_candidate(file_path, config)
+    output_path = _automation_output_candidate(file_path, config)
     warnings: list[str] = []
     _remember_automation_request(
         source=source, event=event, category=category, input_path=str(file_path),
@@ -4566,7 +4634,7 @@ async def automation_queue(request: Request):
             **stability,
         )
 
-    job_id = _queue_file_encode(file_path, config)
+    job_id = _queue_file_encode(file_path, config, output_path=output_path)
     if not job_id:
         _automation_reject(
             "encode job could not be queued",
