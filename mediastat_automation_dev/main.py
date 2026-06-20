@@ -4314,12 +4314,13 @@ def _automation_response(
         decision = "accepted"
     payload["decision"] = decision
     payload["result"] = decision
+    history_payload = {k: v for k, v in payload.items() if k not in ("decision", "result")}
     _remember_automation_result(
         decision,
         reason,
         http_status=200,
         http_outcome="ok",
-        **payload,
+        **history_payload,
     )
     return payload
 
