@@ -17,7 +17,10 @@ automation:
   file_stability_check_enabled: true
   file_stability_wait_seconds: 30
   review_output_enabled: true
-  review_output_root: "/media/mediastat-review"
+  review_output_root: "/media/mediastat-review"  # legacy fallback/display only
+  review_output_mappings:
+    - input_root: "/media/movies"
+      review_root: "/media/MediaStatReview/movies"
   review_preflight_enabled: true
   default_profile: high_quality_hevc_qp18
   default_post_action: keep
@@ -164,7 +167,7 @@ The page also has schedule and review-output controls for automation testing.
 Enter the existing automation token in the password field, set the schedule and
 review output values, and save. Only these whitelisted settings are persisted:
 `schedule.enabled`, `schedule.start`, `schedule.end`, `review_output_enabled`,
-`review_output_root`, and `review_preflight_enabled`.
+`review_preflight_enabled`, and `review_output_mappings`.
 
 ```text
 /data/automation_settings.json
@@ -172,8 +175,10 @@ review output values, and save. Only these whitelisted settings are persisted:
 
 The token is sent as the `X-Automation-Token` header for the save request. It is
 not displayed, stored in the settings file, or written to automation history.
-The review root must be a non-empty absolute `/media/...` path, must not be `/`
-or `/media`, and should point to deliberately mounted storage with enough space.
+Each mapping input root and review root must be a non-empty absolute
+`/media/...` path, must not be `/` or `/media`, and should point to deliberately
+mounted storage with enough space. Duplicate input roots are rejected by the GUI
+settings endpoint.
 
 The page never renders the token value. It only shows `token_configured` as
 `true` or `false`.
@@ -228,18 +233,28 @@ MediaStat returns a file-unstable decision and does not queue anything.
 ## Review output path
 
 Automation plans output into a review/staging area instead of beside the imported
-movie or episode file. With the default automation settings:
+movie or episode file. Configure per-media-root mappings so review output stays
+on the same storage family where practical:
 
 ```yaml
 automation:
   review_output_enabled: true
-  review_output_root: "/media/mediastat-review"
+  review_output_mappings:
+    - input_root: "/media/movies"
+      review_root: "/media/MediaStatReview/movies"
 ```
 
 MediaStat keeps the normal encoded filename, preserves useful relative library
-folders when possible, and places the planned output under the review root. Set
-`review_output_root` from the Automation page to a known mounted storage path,
-preferably Synology-backed, such as `/media/MediaStatReview`.
+folders below the matched `input_root`, and places the planned output under that
+mapping's `review_root`. For example, an input below `/media/movies` can be
+planned below `/media/MediaStatReview/movies` while keeping the movie folder
+structure.
+
+The old single `review_output_root` remains visible for compatibility, but V1
+dry-run planning prefers explicit `review_output_mappings`. If no mapping
+matches the input path, MediaStat does not silently fall back to the global root;
+the dry-run preview is blocked with `queue_blocked_by:
+"review_mapping_missing"` and `preview_status: "blocked_review_mapping"`.
 
 The original media file remains untouched. The review output path is intended to
 stay outside Radarr, Sonarr, Plex, or other live library folders while automation
@@ -253,10 +268,11 @@ response and history. The Automation page prefers `size_before_human` and
 
 Accepted, stable dry-run requests run a review/staging output preflight before
 they are shown as queueable. The preflight confirms that the planned output is
-under `review_output_root`, confirms it is not beside the original media file,
-confirms the review root already exists and is a directory, creates the planned
-parent folder under the review root if needed, writes a tiny probe file there,
-then deletes the probe file.
+under the mapped `review_root`, confirms it is not beside the original media
+file, confirms a review mapping was found, confirms the mapped review root
+already exists and is a directory, creates the planned parent folder under the
+review root if needed, writes a tiny probe file there, then deletes the probe
+file.
 
 If preflight passes, the dry-run preview can show `would_queue: true` while
 still keeping `queued: false` and `job_id: null`. If preflight fails, the request
@@ -267,16 +283,21 @@ a clear `review_preflight_reason`.
 Preflight may create folders only under the configured review output root. It
 must not create a live sidecar output beside Radarr/Sonarr media, write into the
 movie or episode library folder, encode media, or change original files.
-MediaStat does not create `review_output_root` automatically; create or mount it
+MediaStat does not create mapped review roots automatically; create or mount them
 deliberately before testing. If the root is missing, preflight returns
 `review_preflight_ok: false` with `review_preflight_reason:
 "review output root does not exist"`.
 
+If no mapping matches the input path, preflight returns `review_mapping_found:
+false`, `review_preflight_ok: false`, and `review_mapping_reason:
+"no review output mapping matches input path"`.
+
 Responses, Last Decision, and history may include fields such as
 `review_preflight_enabled`, `review_output_enabled`, `review_preflight_ok`,
-`review_root`, `planned_parent_path`, `planned_parent_writable`,
-`output_under_review_root`, `output_beside_original`,
-`movie_library_sidecar_needed`, and `write_probe_ok`.
+`review_mapping_found`, `review_mapping_input_root`,
+`review_mapping_review_root`, `review_mapping_reason`, `review_root`,
+`planned_parent_path`, `planned_parent_writable`, `output_under_review_root`,
+`output_beside_original`, `movie_library_sidecar_needed`, and `write_probe_ok`.
 
 ## Job preview
 
@@ -293,6 +314,8 @@ uses `would_queue: true`, keeps `queued: false`, keeps `job_id: null`, and sets
 Unstable files use `would_queue: false` and `queue_blocked_by: "file_unstable"`.
 Ignored or rejected requests remain non-queueing decisions. The preview does not
 start jobs, encode files, change original media, or change scheduler behaviour.
+Unmapped input roots use `would_queue: false`, `queue_blocked_by:
+"review_mapping_missing"`, and `preview_status: "blocked_review_mapping"`.
 
 For direct HTTP checks, request:
 

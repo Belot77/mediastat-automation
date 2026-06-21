@@ -70,6 +70,7 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
     "file_stability_wait_seconds": 30,
     "review_output_enabled": True,
     "review_output_root": "/media/mediastat-review",
+    "review_output_mappings": [],
     "review_preflight_enabled": True,
     "default_profile": "high_quality_hevc_qp18",
     "default_post_action": "keep",
@@ -198,27 +199,82 @@ def _automation_normalize_time(value: object) -> str | None:
     return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
 
 
-def _automation_normalize_review_root(value: object) -> str:
+def _automation_normalize_media_path(value: object, field_name: str) -> str:
     text = str(value or "").strip()
     if not text:
-        raise ValueError("review_output_root must be a non-empty absolute path")
+        raise ValueError(f"{field_name} must be a non-empty absolute path")
     if any(ch in text for ch in ("\x00", "\r", "\n", "\t")):
-        raise ValueError("review_output_root contains unsafe characters")
+        raise ValueError(f"{field_name} contains unsafe characters")
     if _REVIEW_ROOT_SECRET_RE.search(text):
-        raise ValueError("review_output_root must not contain token or secret values")
+        raise ValueError(f"{field_name} must not contain token or secret values")
     if "://" in text or "\\" in text or "//" in text or any(ch in text for ch in ("*", "?", "<", ">", "|")):
-        raise ValueError("review_output_root contains unsafe characters")
+        raise ValueError(f"{field_name} contains unsafe characters")
     if not text.startswith("/"):
-        raise ValueError("review_output_root must be an absolute path")
+        raise ValueError(f"{field_name} must be an absolute path")
     parts = [part for part in text.split("/") if part]
     if any(part in (".", "..") for part in parts):
-        raise ValueError("review_output_root must not contain parent traversal")
+        raise ValueError(f"{field_name} must not contain parent traversal")
     normalized = "/" + "/".join(parts)
     if normalized in ("/", "/media"):
-        raise ValueError("review_output_root must be below /media, not / or /media")
+        raise ValueError(f"{field_name} must be below /media, not / or /media")
     if not normalized.startswith("/media/"):
-        raise ValueError("review_output_root must start with /media/")
+        raise ValueError(f"{field_name} must start with /media/")
     return normalized.rstrip("/")
+
+
+def _automation_normalize_review_root(value: object) -> str:
+    return _automation_normalize_media_path(value, "review_output_root")
+
+
+def _automation_normalize_mapping_input_root(value: object) -> str:
+    return _automation_normalize_media_path(value, "input_root")
+
+
+def _automation_normalize_mapping_review_root(value: object) -> str:
+    return _automation_normalize_media_path(value, "review_root")
+
+
+def _automation_mapping_entries(value: object, *, strict: bool = False) -> list[dict]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, dict):
+        if "input_root" in value or "review_root" in value:
+            raw_entries = [value]
+        else:
+            raw_entries = [
+                {"input_root": input_root, "review_root": review_root}
+                for input_root, review_root in value.items()
+            ]
+    elif isinstance(value, list):
+        raw_entries = value
+    else:
+        if strict:
+            raise ValueError("review_output_mappings must be a list or object")
+        return []
+
+    mappings_by_root: dict[str, dict] = {}
+    order: list[str] = []
+    for item in raw_entries:
+        if not isinstance(item, dict):
+            if strict:
+                raise ValueError("review_output_mappings entries must be objects")
+            continue
+        try:
+            input_root = _automation_normalize_mapping_input_root(item.get("input_root"))
+            review_root = _automation_normalize_mapping_review_root(item.get("review_root"))
+        except ValueError:
+            if strict:
+                raise
+            continue
+        if input_root in mappings_by_root and strict:
+            raise ValueError(f"duplicate review_output_mappings input_root: {input_root}")
+        if input_root not in mappings_by_root:
+            order.append(input_root)
+        mappings_by_root[input_root] = {
+            "input_root": input_root,
+            "review_root": review_root,
+        }
+    return [mappings_by_root[input_root] for input_root in order if input_root in mappings_by_root]
 
 
 def _automation_settings_override_from_mapping(data: object, *, strict: bool = False) -> dict:
@@ -245,8 +301,11 @@ def _automation_settings_override_from_mapping(data: object, *, strict: bool = F
     for key in ("review_output_enabled", "review_preflight_enabled"):
         if key in data:
             clean[key] = bool(data.get(key))
-    if "review_output_root" in data:
-        clean["review_output_root"] = _automation_normalize_review_root(data.get("review_output_root"))
+    if "review_output_mappings" in data:
+        clean["review_output_mappings"] = _automation_mapping_entries(
+            data.get("review_output_mappings"),
+            strict=strict,
+        )
     return clean
 
 
@@ -4080,24 +4139,8 @@ def _automation_relative_media_parent(file_path: Path) -> Path:
     return max(matches, key=lambda p: len(p.parts))
 
 
-def _automation_output_candidate(file_path: Path, config: dict) -> Path:
-    normal_candidate = _encode_output_candidate(file_path, config)
-    if not AUTOMATION_CONFIG.get("review_output_enabled", True):
-        return normal_candidate
-    review_root_value = str(AUTOMATION_CONFIG.get("review_output_root") or "").strip()
-    if not review_root_value:
-        return normal_candidate
-
-    review_root = Path(review_root_value).expanduser()
-    relative_parent = _automation_relative_media_parent(file_path)
-    base_candidate = review_root / relative_parent / normal_candidate.name
-    candidate = base_candidate
-    active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
-    counter = 2
-    while str(candidate) in active_outputs or candidate.exists():
-        candidate = base_candidate.with_name(f"{base_candidate.stem}-{counter}{base_candidate.suffix}")
-        counter += 1
-    return candidate
+def _automation_output_candidate(file_path: Path, config: dict) -> Path | None:
+    return _automation_output_plan(file_path, config).get("output_path")
 
 
 def _automation_resolve_loose(path: Path) -> Path:
@@ -4117,14 +4160,88 @@ def _automation_same_parent(first: Path, second: Path) -> bool:
     return _automation_resolve_loose(first.parent) == _automation_resolve_loose(second.parent)
 
 
-def _automation_review_output_preflight(file_path: Path, output_path: Path | None) -> dict:
+def _automation_review_mappings() -> list[dict]:
+    return _automation_mapping_entries(AUTOMATION_CONFIG.get("review_output_mappings"))
+
+
+def _automation_relative_to_input_root(file_path: Path, input_root: str) -> Path | None:
+    root_path = Path(input_root)
+    resolved_file = _automation_resolve_loose(file_path)
+    resolved_root = _automation_resolve_loose(root_path)
+    try:
+        return resolved_file.relative_to(resolved_root)
+    except ValueError:
+        pass
+    try:
+        real_file = Path(os.path.realpath(resolved_file))
+        real_root = Path(os.path.realpath(resolved_root))
+        return real_file.relative_to(real_root)
+    except ValueError:
+        return None
+
+
+def _automation_output_plan(file_path: Path, config: dict) -> dict:
+    normal_candidate = _encode_output_candidate(file_path, config)
+    plan = {
+        "output_path": None,
+        "review_mapping_found": False,
+        "review_mapping_input_root": "",
+        "review_mapping_review_root": "",
+        "review_mapping_reason": "",
+    }
+    if not AUTOMATION_CONFIG.get("review_output_enabled", True):
+        plan["review_mapping_reason"] = "review output is disabled"
+        return plan
+
+    matches: list[tuple[int, Path, dict]] = []
+    for mapping in _automation_review_mappings():
+        relative = _automation_relative_to_input_root(file_path, mapping["input_root"])
+        if relative is None:
+            continue
+        matches.append((len(mapping["input_root"].split("/")), relative, mapping))
+
+    if not matches:
+        plan["review_mapping_reason"] = "no review output mapping matches input path"
+        return plan
+
+    _, relative_path, mapping = max(matches, key=lambda item: item[0])
+    review_root = Path(mapping["review_root"])
+    base_candidate = review_root / relative_path.parent / normal_candidate.name
+    candidate = base_candidate
+    active_outputs = {j.output_path for j in _encode_jobs.values() if j.status in ("queued", "running")}
+    counter = 2
+    while str(candidate) in active_outputs or candidate.exists():
+        candidate = base_candidate.with_name(f"{base_candidate.stem}-{counter}{base_candidate.suffix}")
+        counter += 1
+
+    plan.update({
+        "output_path": candidate,
+        "review_mapping_found": True,
+        "review_mapping_input_root": mapping["input_root"],
+        "review_mapping_review_root": mapping["review_root"],
+        "review_mapping_reason": "review output mapping matched input path",
+    })
+    return plan
+
+
+def _automation_review_output_preflight(
+    file_path: Path,
+    output_path: Path | None,
+    output_plan: dict | None = None,
+) -> dict:
+    output_plan = output_plan or {}
     enabled = bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True))
     review_output_enabled = bool(AUTOMATION_CONFIG.get("review_output_enabled", True))
-    review_root_value = str(AUTOMATION_CONFIG.get("review_output_root") or "").strip()
+    mapping_found = bool(output_plan.get("review_mapping_found"))
+    review_root_value = str(output_plan.get("review_mapping_review_root") or "").strip()
     planned_parent = output_path.parent if output_path else None
     result = {
         "review_preflight_enabled": enabled,
         "review_output_enabled": review_output_enabled,
+        "review_mapping_found": mapping_found,
+        "review_mapping_input_root": str(output_plan.get("review_mapping_input_root") or ""),
+        "review_mapping_review_root": review_root_value,
+        "review_mapping_reason": str(output_plan.get("review_mapping_reason") or ""),
         "review_preflight_ok": None,
         "review_preflight_reason": "",
         "review_root": review_root_value,
@@ -4139,14 +4256,20 @@ def _automation_review_output_preflight(file_path: Path, output_path: Path | Non
         "movie_library_sidecar_needed": None,
         "write_probe_ok": None,
     }
-    if not enabled:
-        result["review_preflight_ok"] = True
-        result["review_preflight_reason"] = "review output preflight disabled"
-        return result
     if not review_output_enabled:
         result["review_preflight_ok"] = False
         result["review_preflight_reason"] = "review output is disabled"
         result["movie_library_sidecar_needed"] = True
+        return result
+    if not mapping_found:
+        result["review_preflight_ok"] = False
+        result["review_mapping_reason"] = result["review_mapping_reason"] or "no review output mapping matches input path"
+        result["review_preflight_reason"] = result["review_mapping_reason"]
+        result["movie_library_sidecar_needed"] = True
+        return result
+    if not enabled:
+        result["review_preflight_ok"] = True
+        result["review_preflight_reason"] = "review output preflight disabled"
         return result
     if output_path is None:
         result["review_preflight_ok"] = False
@@ -4154,7 +4277,7 @@ def _automation_review_output_preflight(file_path: Path, output_path: Path | Non
         return result
     if not review_root_value:
         result["review_preflight_ok"] = False
-        result["review_preflight_reason"] = "review output root is not configured"
+        result["review_preflight_reason"] = "review mapping review root is not configured"
         result["movie_library_sidecar_needed"] = True
         return result
 
@@ -4539,6 +4662,10 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         "stability_reason": str(record.get("stability_reason") or ""),
         "review_preflight_enabled": _automation_bool_or_none(record.get("review_preflight_enabled")),
         "review_output_enabled": _automation_bool_or_none(record.get("review_output_enabled")),
+        "review_mapping_found": _automation_bool_or_none(record.get("review_mapping_found")),
+        "review_mapping_input_root": str(record.get("review_mapping_input_root") or ""),
+        "review_mapping_review_root": str(record.get("review_mapping_review_root") or ""),
+        "review_mapping_reason": str(record.get("review_mapping_reason") or ""),
         "review_preflight_ok": _automation_bool_or_none(record.get("review_preflight_ok")),
         "review_preflight_reason": str(record.get("review_preflight_reason") or ""),
         "review_root": str(record.get("review_root") or ""),
@@ -4615,7 +4742,9 @@ def _automation_status_payload() -> dict:
         "file_stability_wait_seconds": _automation_stability_wait_seconds(),
         "review_output_enabled": bool(AUTOMATION_CONFIG.get("review_output_enabled", True)),
         "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
+        "review_output_mappings": _automation_review_mappings(),
         "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
+        "allowed_roots": [str(root) for root in ALLOWED_ROOTS],
         "schedule": public_schedule,
         "schedule_window": public_schedule["window"],
         "default_profile": AUTOMATION_CONFIG.get("default_profile"),
@@ -4681,6 +4810,10 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "stability_reason": str(summary.get("stability_reason") or ""),
         "review_preflight_enabled": _automation_bool_or_none(summary.get("review_preflight_enabled")),
         "review_output_enabled": _automation_bool_or_none(summary.get("review_output_enabled")),
+        "review_mapping_found": _automation_bool_or_none(summary.get("review_mapping_found")),
+        "review_mapping_input_root": str(summary.get("review_mapping_input_root") or ""),
+        "review_mapping_review_root": str(summary.get("review_mapping_review_root") or ""),
+        "review_mapping_reason": str(summary.get("review_mapping_reason") or ""),
         "review_preflight_ok": _automation_bool_or_none(summary.get("review_preflight_ok")),
         "review_preflight_reason": str(summary.get("review_preflight_reason") or ""),
         "review_root": str(summary.get("review_root") or ""),
@@ -4896,12 +5029,12 @@ def _validate_automation_schedule_settings(value: object) -> dict:
 
 def _validate_automation_review_settings(value: dict) -> dict:
     try:
-        review_output_root = _automation_normalize_review_root(value.get("review_output_root"))
+        mappings = _automation_mapping_entries(value.get("review_output_mappings"), strict=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail={"error": str(exc)})
     return {
         "review_output_enabled": bool(value.get("review_output_enabled", False)),
-        "review_output_root": review_output_root,
+        "review_output_mappings": mappings,
         "review_preflight_enabled": bool(value.get("review_preflight_enabled", False)),
     }
 
@@ -4951,6 +5084,7 @@ async def automation_settings(request: Request):
         },
         "review_output_enabled": bool(AUTOMATION_CONFIG.get("review_output_enabled", True)),
         "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
+        "review_output_mappings": _automation_review_mappings(),
         "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
     }
 
@@ -5076,11 +5210,14 @@ async def automation_queue(request: Request):
         "automation_category": category,
         "automation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     })
-    output_path = _automation_output_candidate(file_path, config)
+    output_plan = _automation_output_plan(file_path, config)
+    output_path = output_plan.get("output_path")
+    output_plan_context = {k: v for k, v in output_plan.items() if k != "output_path"}
+    output_path_text = str(output_path or "")
     warnings: list[str] = []
     _remember_automation_request(
         source=source, event=event, category=category, input_path=str(file_path),
-        output_path=str(output_path), profile=profile_name, post_action=post_action,
+        output_path=output_path_text, profile=profile_name, post_action=post_action,
     )
 
     stability = await _automation_file_stability(file_path)
@@ -5096,7 +5233,7 @@ async def automation_queue(request: Request):
             profile=profile_name,
             post_action=post_action,
             input_path=str(file_path),
-            output_path=str(output_path),
+            output_path=output_path_text,
         )
         _automation_reject(
             "file is not stable",
@@ -5108,7 +5245,7 @@ async def automation_queue(request: Request):
             profile=profile_name,
             post_action=post_action,
             input_path=str(file_path),
-            output_path=str(output_path),
+            output_path=output_path_text,
             warnings=warnings,
             preview=preview,
             **stability,
@@ -5118,8 +5255,20 @@ async def automation_queue(request: Request):
         source in ("radarr", "sonarr")
         and not dry_run
         and not AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)
+        and output_path is not None
         and output_path.parent == file_path.parent
     ):
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by="arr_sidecar_output_blocked",
+            preview_status="blocked_arr_sidecar_output",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+        )
         _automation_reject(
             "live Radarr/Sonarr sidecar output is blocked in automation V1",
             status_code=409,
@@ -5127,26 +5276,32 @@ async def automation_queue(request: Request):
             event=event,
             profile=profile_name,
             input_path=str(file_path),
-            output_path=str(output_path),
+            output_path=output_path_text,
+            dry_run=dry_run,
+            preview=preview,
             **stability,
         )
 
     if dry_run:
-        preflight = await asyncio.to_thread(_automation_review_output_preflight, file_path, output_path)
+        preflight = await asyncio.to_thread(_automation_review_output_preflight, file_path, output_path, output_plan)
         preflight_ok = preflight.get("review_preflight_ok") is not False
         preflight_reason = str(preflight.get("review_preflight_reason") or "")
         if not preflight_ok and preflight_reason:
             warnings.append(preflight_reason)
+        mapping_missing = (
+            preflight.get("review_mapping_found") is False
+            and preflight.get("review_mapping_reason") == "no review output mapping matches input path"
+        )
         preview = _automation_job_preview(
             would_queue=preflight_ok,
-            queue_blocked_by="dry_run" if preflight_ok else "review_preflight_failed",
-            preview_status="would_queue" if preflight_ok else "blocked_review_preflight",
+            queue_blocked_by="dry_run" if preflight_ok else ("review_mapping_missing" if mapping_missing else "review_preflight_failed"),
+            preview_status="would_queue" if preflight_ok else ("blocked_review_mapping" if mapping_missing else "blocked_review_preflight"),
             source=source,
             event=event,
             profile=profile_name,
             post_action="keep",
             input_path=str(file_path),
-            output_path=str(output_path),
+            output_path=output_path_text,
         )
         log.info(
             "Automation dry-run accepted: source=%s event=%s category=%s profile=%s input=%s output=%s",
@@ -5155,9 +5310,72 @@ async def automation_queue(request: Request):
         return _automation_response(
             queued=False, ignored=False, dry_run=True, job_id=None,
             source=source, event=event, category=category, profile=profile_name,
-            post_action="keep", input_path=str(file_path), output_path=str(output_path),
+            post_action="keep", input_path=str(file_path), output_path=output_path_text,
             warnings=warnings, reason="" if preflight_ok else preflight_reason,
             stability=stability, preflight=preflight, preview=preview,
+        )
+
+    mapping_missing = (
+        bool(AUTOMATION_CONFIG.get("review_output_enabled", True))
+        and output_plan.get("review_mapping_found") is False
+        and output_plan.get("review_mapping_reason") == "no review output mapping matches input path"
+    )
+    if mapping_missing:
+        reason = "no review output mapping matches input path"
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by="review_mapping_missing",
+            preview_status="blocked_review_mapping",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+        )
+        _automation_reject(
+            reason,
+            status_code=409,
+            source=source,
+            event=event,
+            profile=profile_name,
+            input_path=str(file_path),
+            output_path=output_path_text,
+            dry_run=dry_run,
+            preview=preview,
+            **stability,
+            **output_plan_context,
+        )
+
+    if (
+        source in ("radarr", "sonarr")
+        and not AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)
+        and output_path is None
+    ):
+        reason = "no safe automation output path was planned"
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by="no_safe_output_path",
+            preview_status="blocked_no_safe_output_path",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+        )
+        _automation_reject(
+            reason,
+            status_code=409,
+            source=source,
+            event=event,
+            profile=profile_name,
+            input_path=str(file_path),
+            output_path=output_path_text,
+            dry_run=dry_run,
+            preview=preview,
+            **stability,
+            **output_plan_context,
         )
 
     if not shutil.which("ffmpeg"):
@@ -5165,7 +5383,7 @@ async def automation_queue(request: Request):
             "ffmpeg not found in PATH",
             status_code=503,
             source=source, event=event, profile=profile_name, input_path=str(file_path),
-            output_path=str(output_path),
+            output_path=output_path_text,
             **stability,
         )
 

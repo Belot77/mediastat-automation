@@ -101,6 +101,8 @@
         .history-badge.ignored-true { color: var(--yellow); border-color: var(--yellow); }
         .history-badge.file_stable-true { color: var(--green); border-color: var(--green); }
         .history-badge.file_stable-false { color: var(--red); border-color: var(--red); }
+        .history-badge.review_mapping_found-true { color: var(--green); border-color: var(--green); }
+        .history-badge.review_mapping_found-false { color: var(--red); border-color: var(--red); }
         .history-badge.would_queue-true { color: var(--green); border-color: var(--green); }
         .history-badge.would_queue-false { color: var(--muted); border-color: var(--border); }
         .history-badge.review_preflight_ok-true { color: var(--green); border-color: var(--green); }
@@ -144,8 +146,31 @@
             color: var(--text);
             padding: 8px 9px;
         }
+        .settings-full { grid-column: 1 / -1; }
         .settings-wide { grid-column: span 2; }
         .settings-help { color: var(--muted); font-size: var(--fs-sm); line-height: 1.35; margin: 0; }
+        .mapping-list { display: grid; gap: 8px; }
+        .mapping-row {
+            display: grid;
+            grid-template-columns: minmax(180px, 1fr) minmax(180px, 1fr);
+            gap: 8px;
+            align-items: start;
+        }
+        .mapping-row label {
+            display: grid;
+            gap: 5px;
+            min-width: 0;
+        }
+        .mapping-label { color: var(--muted); font-size: var(--fs-sm); font-weight: 600; }
+        .settings-secondary {
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 7px 10px;
+            cursor: pointer;
+            justify-self: start;
+        }
         .settings-check { display: flex; align-items: center; gap: 8px; min-height: 36px; }
         .settings-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
         .settings-actions button {
@@ -180,6 +205,8 @@
             .history-field { grid-template-columns: 1fr; gap: 3px; }
             .settings-grid { grid-template-columns: 1fr; }
             .settings-wide { grid-column: auto; }
+            .settings-full { grid-column: auto; }
+            .mapping-row { grid-template-columns: 1fr; }
             .settings-actions { display: grid; }
         }
     </style>
@@ -243,14 +270,15 @@
                         <span>enabled</span>
                     </label>
                 </div>
-                <div class="settings-field settings-wide">
-                    <label for="review-output-root">Review output root</label>
-                    <input type="text" id="review-output-root" placeholder="/media/MediaStatReview" required>
-                    <p class="settings-help">Review root must be a mounted storage path with enough space, preferably Synology-backed. The root must already exist; MediaStat will not create the root automatically.</p>
-                </div>
                 <div class="settings-field">
                     <label for="automation-token">Automation token</label>
                     <input type="password" id="automation-token" autocomplete="current-password" placeholder="Required to save">
+                </div>
+                <div class="settings-field settings-full">
+                    <label>Review output mappings</label>
+                    <p class="settings-help">Map each media input root to a mounted review root on the same storage family where practical. Review roots must be /media/... paths and must already exist before preflight can pass.</p>
+                    <div class="mapping-list" id="review-mapping-list"></div>
+                    <button type="button" class="settings-secondary" id="add-review-mapping">Add Mapping</button>
                 </div>
             </div>
             <div class="settings-actions">
@@ -429,6 +457,8 @@ function hasPreflight(item) {
     return !isBlank(item.review_preflight_ok) ||
         !isBlank(item.review_preflight_enabled) ||
         !isBlank(item.review_output_enabled) ||
+        !isBlank(item.review_mapping_found) ||
+        !isBlank(item.review_mapping_reason) ||
         !isBlank(item.review_preflight_reason);
 }
 
@@ -438,6 +468,9 @@ function preflightSummary(item) {
         `enabled ${optionalBoolText(item.review_preflight_enabled)}`,
         `review_output ${optionalBoolText(item.review_output_enabled)}`
     ];
+    if (!isBlank(item.review_mapping_found)) parts.push(`mapping ${boolText(item.review_mapping_found)}`);
+    if (!isBlank(item.review_mapping_review_root)) parts.push(`review_root ${item.review_mapping_review_root}`);
+    if (!isBlank(item.review_mapping_reason)) parts.push(item.review_mapping_reason);
     if (!isBlank(item.review_preflight_ok)) parts.push(`ok ${boolText(item.review_preflight_ok)}`);
     if (!isBlank(item.review_preflight_reason)) parts.push(item.review_preflight_reason);
     if (!isBlank(item.planned_parent_writable)) parts.push(`writable ${boolText(item.planned_parent_writable)}`);
@@ -460,6 +493,57 @@ function setSettingsStatus(message, kind = '') {
     el.textContent = message || '';
 }
 
+function mappingRowHtml(inputRoot = '', reviewRoot = '') {
+    return `
+        <div class="mapping-row">
+            <label>
+                <span class="mapping-label">input_root</span>
+                <input type="text" class="mapping-input-root" value="${esc(inputRoot)}" placeholder="/media/movies">
+            </label>
+            <label>
+                <span class="mapping-label">review_root</span>
+                <input type="text" class="mapping-review-root" value="${esc(reviewRoot)}" placeholder="/media/MediaStatReview/movies">
+            </label>
+        </div>
+    `;
+}
+
+function renderReviewMappings(data) {
+    const list = document.getElementById('review-mapping-list');
+    const mappings = Array.isArray(data.review_output_mappings) ? data.review_output_mappings : [];
+    const byInput = new Map();
+    mappings.forEach(mapping => {
+        if (mapping && mapping.input_root) byInput.set(mapping.input_root, mapping.review_root || '');
+    });
+
+    const roots = [];
+    const seen = new Set();
+    (Array.isArray(data.allowed_roots) ? data.allowed_roots : []).forEach(root => {
+        const text = String(root || '').trim();
+        if (!text || text === '/media' || !text.startsWith('/media/') || seen.has(text)) return;
+        seen.add(text);
+        roots.push(text);
+    });
+    mappings.forEach(mapping => {
+        const inputRoot = mapping && mapping.input_root ? String(mapping.input_root) : '';
+        if (!inputRoot || seen.has(inputRoot)) return;
+        seen.add(inputRoot);
+        roots.push(inputRoot);
+    });
+
+    const rows = roots.length
+        ? roots.map(inputRoot => mappingRowHtml(inputRoot, byInput.get(inputRoot) || '')).join('')
+        : mappingRowHtml('', '');
+    list.innerHTML = rows;
+}
+
+function collectReviewMappings() {
+    return Array.from(document.querySelectorAll('.mapping-row')).map(row => ({
+        input_root: row.querySelector('.mapping-input-root').value.trim(),
+        review_root: row.querySelector('.mapping-review-root').value.trim()
+    })).filter(mapping => mapping.input_root || mapping.review_root);
+}
+
 function updateScheduleForm(data) {
     const schedule = data.schedule || {};
     document.getElementById('schedule-enabled').checked = boolValue(schedule.enabled);
@@ -467,7 +551,7 @@ function updateScheduleForm(data) {
     document.getElementById('schedule-end').value = normalizeTimeForInput(schedule.end, '06:00');
     document.getElementById('review-output-enabled').checked = boolValue(data.review_output_enabled);
     document.getElementById('review-preflight-enabled').checked = boolValue(data.review_preflight_enabled);
-    document.getElementById('review-output-root').value = data.review_output_root || '/media/MediaStatReview';
+    renderReviewMappings(data);
 }
 
 async function saveAutomationSettings(event) {
@@ -482,8 +566,8 @@ async function saveAutomationSettings(event) {
             end: document.getElementById('schedule-end').value
         },
         review_output_enabled: document.getElementById('review-output-enabled').checked,
-        review_output_root: document.getElementById('review-output-root').value.trim(),
-        review_preflight_enabled: document.getElementById('review-preflight-enabled').checked
+        review_preflight_enabled: document.getElementById('review-preflight-enabled').checked,
+        review_output_mappings: collectReviewMappings()
     };
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['X-Automation-Token'] = token;
@@ -505,7 +589,7 @@ async function saveAutomationSettings(event) {
         setSettingsStatus('Automation settings saved', 'ok');
         await loadAutomationStatus();
     } catch (err) {
-        setSettingsStatus(err.message || 'Could not save schedule', 'error');
+        setSettingsStatus(err.message || 'Could not save automation settings', 'error');
     } finally {
         tokenInput.value = '';
         button.disabled = false;
@@ -527,6 +611,7 @@ function renderHistory(history) {
         const footer = [
             reason ? historyField('error/reason', reason) : '',
             item.stability_reason ? historyField('stability_reason', item.stability_reason) : '',
+            item.review_mapping_reason ? historyField('review_mapping_reason', item.review_mapping_reason) : '',
             item.review_preflight_reason ? historyField('review_preflight_reason', item.review_preflight_reason) : '',
             warnings ? historyField('warnings', warnings) : ''
         ].join('');
@@ -538,9 +623,10 @@ function renderHistory(history) {
                         <div class="history-source">${source}</div>
                     </div>
                     <div class="history-badges">
-                        ${historyDecisionBadge(item)}
+        ${historyDecisionBadge(item)}
                         ${optionalFlagBadge('would_queue', previewValue(item, 'would_queue'))}
                         ${optionalFlagBadge('file_stable', item.file_stable)}
+                        ${optionalFlagBadge('review_mapping_found', item.review_mapping_found)}
                         ${optionalFlagBadge('review_preflight_ok', item.review_preflight_ok)}
                         ${flagBadge('dry_run', item.dry_run)}
                         ${flagBadge('queued', item.queued)}
@@ -552,6 +638,8 @@ function renderHistory(history) {
                     ${hasPreview(item) ? historyField('job_preview', previewSummary(item)) : ''}
                     ${hasStability(item) ? historyField('file_stability', stabilitySummary(item)) : ''}
                     ${hasPreflight(item) ? historyField('review_preflight', preflightSummary(item)) : ''}
+                    ${item.review_mapping_input_root ? historyField('review_mapping_input_root', item.review_mapping_input_root, 'path-value') : ''}
+                    ${item.review_mapping_review_root ? historyField('review_mapping_review_root', item.review_mapping_review_root, 'path-value') : ''}
                     ${historyField('input_path', item.input_path, 'path-value')}
                     ${historyField('output_path', item.output_path, 'path-value')}
                 </div>
@@ -577,6 +665,7 @@ async function loadAutomationStatus() {
         ['file_stability_wait_seconds', esc(data.file_stability_wait_seconds)],
         ['review_output_enabled', esc(boolText(data.review_output_enabled))],
         ['review_output_root', esc(data.review_output_root)],
+        ['review_output_mappings', esc((data.review_output_mappings || []).map(mapping => `${mapping.input_root} -> ${mapping.review_root}`).join(' / '))],
         ['review_preflight_enabled', esc(boolText(data.review_preflight_enabled))],
         ['schedule', esc([boolText(data.schedule?.enabled), data.schedule_window].filter(v => !isBlank(v)).join(' / '))],
         ['default_profile', esc(data.default_profile)],
@@ -614,6 +703,10 @@ async function loadAutomationStatus() {
         ['review_preflight_ok', esc(optionalBoolText(result.review_preflight_ok))],
         ['review_preflight_enabled', esc(optionalBoolText(result.review_preflight_enabled))],
         ['review_output_enabled', esc(optionalBoolText(result.review_output_enabled))],
+        ['review_mapping_found', esc(optionalBoolText(result.review_mapping_found))],
+        ['review_mapping_input_root', esc(result.review_mapping_input_root)],
+        ['review_mapping_review_root', esc(result.review_mapping_review_root)],
+        ['review_mapping_reason', esc(result.review_mapping_reason)],
         ['review_preflight_reason', esc(result.review_preflight_reason)],
         ['review_root', esc(result.review_root)],
         ['review_root_exists', esc(optionalBoolText(result.review_root_exists))],
@@ -680,6 +773,9 @@ loadAutomationStatus().catch(err => {
         `<dt>error</dt><dd>${esc(err.message)}</dd>`;
 });
 document.getElementById('automation-settings-form').addEventListener('submit', saveAutomationSettings);
+document.getElementById('add-review-mapping').addEventListener('click', () => {
+    document.getElementById('review-mapping-list').insertAdjacentHTML('beforeend', mappingRowHtml('', ''));
+});
 </script>
 </body>
 </html>
