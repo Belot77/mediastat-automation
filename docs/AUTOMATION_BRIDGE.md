@@ -13,6 +13,7 @@ automation:
   enabled: true
   token: "YOUR_AUTOMATION_TOKEN"
   dry_run: true
+  live_review_enabled: false
   allow_arr_sidecar_output: false
   file_stability_check_enabled: true
   file_stability_wait_seconds: 30
@@ -150,6 +151,8 @@ curl -X POST "http://HOME_ASSISTANT_HOST:8080/automation/queue" \
 
 Keep `dry_run: true` for first tests. MediaStat validates the request and returns
 the output path that would be queued, but it does not create an encode job.
+Setting `dry_run: false` alone is not enough to queue live automation; the
+separate `live_review_enabled` gate also defaults to `false`.
 
 With `dry_run: false`, Radarr and Sonarr requests are blocked by default when the
 candidate output would be a live sidecar file in the same library folder as the
@@ -167,7 +170,8 @@ The page also has schedule and review-output controls for automation testing.
 Enter the existing automation token in the password field, set the schedule and
 review output values, and save. Only these whitelisted settings are persisted:
 `schedule.enabled`, `schedule.start`, `schedule.end`, `review_output_enabled`,
-`review_preflight_enabled`, and `review_output_mappings`.
+`review_preflight_enabled`, `review_output_mappings`, and
+`live_review_enabled`.
 
 ```text
 /data/automation_settings.json
@@ -313,6 +317,26 @@ Responses, Last Decision, and history may include fields such as
 `review_mapping_review_root`, `review_mapping_reason`, `review_root`,
 `planned_parent_path`, `planned_parent_writable`, `output_under_review_root`,
 `output_beside_original`, `movie_library_sidecar_needed`, and `write_probe_ok`.
+
+## Live review encode gate
+
+`live_review_enabled` is a separate safety gate for future controlled live
+review encodes. It defaults to `false`. Turning `dry_run` off is not enough to
+queue live automation; when `dry_run: false` and `live_review_enabled: false`,
+the request is blocked with `queue_blocked_by: "live_review_disabled"` and
+`preview_status: "blocked_live_review_disabled"`.
+
+For Radarr/Sonarr live review automation, MediaStat must still prove all safety
+conditions before queueing: the schedule must be enabled and open, review output
+must be enabled, a per-root mapping must match, the planned output path must be
+under the mapped MediaStatReview folder, review preflight must be enabled and
+pass, the output must not be beside the original media file, and
+`allow_arr_sidecar_output` must remain `false`.
+
+When live review encodes are later enabled deliberately, they only queue normal
+MediaStat encode jobs into mapped MediaStatReview folders. This stage does not
+replace, delete, move, or rename originals, and it does not call Radarr, Sonarr,
+or Plex refresh APIs.
 
 ## Job preview
 

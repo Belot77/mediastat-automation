@@ -65,6 +65,7 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
     "enabled": False,
     "token": "",
     "dry_run": True,
+    "live_review_enabled": False,
     "allow_arr_sidecar_output": False,
     "file_stability_check_enabled": True,
     "file_stability_wait_seconds": 30,
@@ -298,7 +299,7 @@ def _automation_settings_override_from_mapping(data: object, *, strict: bool = F
     elif "schedule" in data and strict:
         raise ValueError("schedule settings must be an object")
 
-    for key in ("review_output_enabled", "review_preflight_enabled"):
+    for key in ("review_output_enabled", "review_preflight_enabled", "live_review_enabled"):
         if key in data:
             clean[key] = bool(data.get(key))
     if "review_output_mappings" in data:
@@ -4492,6 +4493,18 @@ def _automation_schedule_preview() -> dict:
     }
 
 
+def _automation_live_review_enabled() -> bool:
+    return bool(AUTOMATION_CONFIG.get("live_review_enabled", False))
+
+
+def _automation_live_review_gate_reason(dry_run: bool) -> str:
+    if dry_run:
+        return "dry_run is enabled; live review queueing is blocked"
+    if not _automation_live_review_enabled():
+        return "live review encode gate is disabled"
+    return "live review encode gate is enabled"
+
+
 def _automation_job_preview(
     *,
     would_queue: bool,
@@ -4650,6 +4663,8 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         "warnings": _automation_history_warnings(record.get("warnings")),
         "http_status": record.get("http_status"),
         "http_outcome": str(record.get("http_outcome") or ""),
+        "live_review_enabled": _automation_bool_or_none(record.get("live_review_enabled")),
+        "live_review_gate_reason": str(record.get("live_review_gate_reason") or ""),
         "file_stable": _automation_bool_or_none(record.get("file_stable")),
         "stability_check_enabled": _automation_bool_or_none(record.get("stability_check_enabled")),
         "stability_wait_seconds": record.get("stability_wait_seconds"),
@@ -4738,6 +4753,8 @@ def _automation_status_payload() -> dict:
     return {
         "enabled": bool(AUTOMATION_CONFIG.get("enabled")),
         "dry_run": bool(AUTOMATION_CONFIG.get("dry_run", True)),
+        "live_review_enabled": _automation_live_review_enabled(),
+        "live_review_gate_reason": _automation_live_review_gate_reason(bool(AUTOMATION_CONFIG.get("dry_run", True))),
         "allow_arr_sidecar_output": bool(AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)),
         "file_stability_check_enabled": bool(AUTOMATION_CONFIG.get("file_stability_check_enabled", True)),
         "file_stability_wait_seconds": _automation_stability_wait_seconds(),
@@ -4801,6 +4818,8 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "warnings": _automation_history_warnings(summary.get("warnings")),
         "http_status": summary.get("http_status"),
         "http_outcome": str(summary.get("http_outcome") or ""),
+        "live_review_enabled": _automation_bool_or_none(summary.get("live_review_enabled")),
+        "live_review_gate_reason": str(summary.get("live_review_gate_reason") or ""),
         "file_stable": _automation_bool_or_none(summary.get("file_stable")),
         "stability_check_enabled": _automation_bool_or_none(summary.get("stability_check_enabled")),
         "stability_wait_seconds": summary.get("stability_wait_seconds"),
@@ -4846,6 +4865,8 @@ def _automation_reject(
 ) -> None:
     safe_context = {k: v for k, v in context.items() if v not in (None, "")}
     safe_context.setdefault("dry_run", bool(AUTOMATION_CONFIG.get("dry_run", True)))
+    safe_context.setdefault("live_review_enabled", _automation_live_review_enabled())
+    safe_context.setdefault("live_review_gate_reason", _automation_live_review_gate_reason(bool(safe_context.get("dry_run"))))
     _automation_attach_preview(safe_context, preview)
     _remember_automation_result(
         decision,
@@ -4863,6 +4884,7 @@ def _automation_reject(
             "result": decision,
             "queued": False,
             "ignored": False,
+            "job_id": None,
             **safe_context,
         },
     )
@@ -4891,6 +4913,8 @@ def _automation_response(
         "queued": queued,
         "ignored": ignored,
         "dry_run": dry_run,
+        "live_review_enabled": _automation_live_review_enabled(),
+        "live_review_gate_reason": _automation_live_review_gate_reason(dry_run),
         "job_id": job_id,
         "source": source,
         "event": event,
@@ -5039,6 +5063,7 @@ def _validate_automation_review_settings(value: dict) -> dict:
         "review_output_enabled": bool(value.get("review_output_enabled", False)),
         "review_output_mappings": mappings,
         "review_preflight_enabled": bool(value.get("review_preflight_enabled", False)),
+        "live_review_enabled": bool(value.get("live_review_enabled", False)),
     }
 
 
@@ -5089,6 +5114,7 @@ async def automation_settings(request: Request):
         "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
         "review_output_mappings": _automation_review_mappings(),
         "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
+        "live_review_enabled": _automation_live_review_enabled(),
     }
 
 
@@ -5116,6 +5142,7 @@ async def automation_queue(request: Request):
     category = str(body.get("category") or "").strip()
     input_path = str(body.get("path") or "").strip()
     dry_run = bool(AUTOMATION_CONFIG.get("dry_run", True))
+    live_review_enabled = _automation_live_review_enabled()
     _remember_automation_request(source=source, event=event, category=category, input_path=input_path)
 
     sources = AUTOMATION_CONFIG.get("sources") or {}
@@ -5254,37 +5281,6 @@ async def automation_queue(request: Request):
             **stability,
         )
 
-    if (
-        source in ("radarr", "sonarr")
-        and not dry_run
-        and not AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False)
-        and output_path is not None
-        and output_path.parent == file_path.parent
-    ):
-        preview = _automation_job_preview(
-            would_queue=False,
-            queue_blocked_by="arr_sidecar_output_blocked",
-            preview_status="blocked_arr_sidecar_output",
-            source=source,
-            event=event,
-            profile=profile_name,
-            post_action="keep",
-            input_path=str(file_path),
-            output_path=output_path_text,
-        )
-        _automation_reject(
-            "live Radarr/Sonarr sidecar output is blocked in automation V1",
-            status_code=409,
-            source=source,
-            event=event,
-            profile=profile_name,
-            input_path=str(file_path),
-            output_path=output_path_text,
-            dry_run=dry_run,
-            preview=preview,
-            **stability,
-        )
-
     if dry_run:
         preflight = await asyncio.to_thread(_automation_review_output_preflight, file_path, output_path, output_plan)
         preflight_ok = preflight.get("review_preflight_ok") is not False
@@ -5317,6 +5313,133 @@ async def automation_queue(request: Request):
             warnings=warnings, reason="" if preflight_ok else preflight_reason,
             stability=stability, preflight=preflight, preview=preview,
         )
+
+    preflight: dict | None = None
+
+    if not live_review_enabled:
+        reason = "live review encode gate is disabled"
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by="live_review_disabled",
+            preview_status="blocked_live_review_disabled",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+        )
+        _automation_reject(
+            reason,
+            status_code=409,
+            source=source,
+            event=event,
+            category=category,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+            dry_run=dry_run,
+            live_review_gate_reason=reason,
+            preview=preview,
+            **stability,
+            **output_plan_context,
+        )
+
+    if source in ("radarr", "sonarr"):
+        schedule_preview = _automation_schedule_preview()
+        if (
+            schedule_preview.get("schedule_enabled") is not True
+            or schedule_preview.get("schedule_currently_open") is not True
+        ):
+            reason = str(schedule_preview.get("schedule_reason") or "automation schedule window is closed")
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="schedule_closed",
+                preview_status="blocked_schedule",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **output_plan_context,
+            )
+
+        if AUTOMATION_CONFIG.get("allow_arr_sidecar_output", False):
+            reason = "live review encodes require Radarr/Sonarr sidecar output blocking"
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="arr_sidecar_output_blocked",
+                preview_status="blocked_arr_sidecar_output",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **output_plan_context,
+            )
+
+        if not AUTOMATION_CONFIG.get("review_output_enabled", True):
+            reason = "review output is disabled"
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="review_preflight_failed",
+                preview_status="blocked_review_preflight",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **output_plan_context,
+            )
 
     mapping_missing = (
         bool(AUTOMATION_CONFIG.get("review_output_enabled", True))
@@ -5381,23 +5504,208 @@ async def automation_queue(request: Request):
             **output_plan_context,
         )
 
+    if source in ("radarr", "sonarr") and output_path is not None and output_path.parent == file_path.parent:
+        reason = "live Radarr/Sonarr sidecar output is blocked in automation V1"
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by="arr_sidecar_output_blocked",
+            preview_status="blocked_arr_sidecar_output",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+        )
+        _automation_reject(
+            reason,
+            status_code=409,
+            source=source,
+            event=event,
+            category=category,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=output_path_text,
+            dry_run=dry_run,
+            live_review_gate_reason=reason,
+            preview=preview,
+            **stability,
+            **output_plan_context,
+        )
+
+    if source in ("radarr", "sonarr"):
+        preflight = await asyncio.to_thread(_automation_review_output_preflight, file_path, output_path, output_plan)
+        preflight_reason = str(preflight.get("review_preflight_reason") or "")
+        if preflight.get("review_preflight_enabled") is not True:
+            reason = preflight_reason or "review output preflight disabled"
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="review_preflight_failed",
+                preview_status="blocked_review_preflight",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **preflight,
+            )
+        if preflight.get("review_mapping_found") is False:
+            reason = str(preflight.get("review_mapping_reason") or preflight_reason or "no review output mapping matches input path")
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="review_mapping_missing",
+                preview_status="blocked_review_mapping",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **preflight,
+            )
+        if preflight.get("output_beside_original") is True or preflight.get("movie_library_sidecar_needed") is True:
+            reason = preflight_reason or "planned output would be beside the original media file"
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="arr_sidecar_output_blocked",
+                preview_status="blocked_arr_sidecar_output",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **preflight,
+            )
+        if preflight.get("output_under_review_root") is not True:
+            reason = preflight_reason or "planned output is outside the review output root"
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="no_safe_output_path",
+                preview_status="blocked_no_safe_output_path",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **preflight,
+            )
+        if preflight.get("review_preflight_ok") is not True:
+            reason = preflight_reason or "review output preflight failed"
+            preview = _automation_job_preview(
+                would_queue=False,
+                queue_blocked_by="review_preflight_failed",
+                preview_status="blocked_review_preflight",
+                source=source,
+                event=event,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+            )
+            _automation_reject(
+                reason,
+                status_code=409,
+                source=source,
+                event=event,
+                category=category,
+                profile=profile_name,
+                post_action="keep",
+                input_path=str(file_path),
+                output_path=output_path_text,
+                dry_run=dry_run,
+                live_review_gate_reason=reason,
+                preview=preview,
+                **stability,
+                **preflight,
+            )
+
     if not shutil.which("ffmpeg"):
+        failure_context = dict(stability)
+        if preflight:
+            failure_context.update(preflight)
         _automation_reject(
             "ffmpeg not found in PATH",
             status_code=503,
             source=source, event=event, profile=profile_name, input_path=str(file_path),
             output_path=output_path_text,
-            **stability,
+            **failure_context,
         )
 
     job_id = _queue_file_encode(file_path, config, output_path=output_path)
     if not job_id:
+        failure_context = dict(stability)
+        if preflight:
+            failure_context.update(preflight)
         _automation_reject(
             "encode job could not be queued",
             status_code=503,
             source=source, event=event, profile=profile_name, input_path=str(file_path),
             output_path=str(output_path),
-            **stability,
+            **failure_context,
         )
     await _save_encode_job(_encode_jobs[job_id])
     _enqueue_job(job_id)
@@ -5410,7 +5718,18 @@ async def automation_queue(request: Request):
         queued=True, ignored=False, dry_run=False, job_id=job_id,
         source=source, event=event, category=category, profile=profile_name,
         post_action="keep", input_path=str(file_path), output_path=queued_output,
-        warnings=warnings, stability=stability,
+        warnings=warnings, stability=stability, preflight=preflight,
+        preview=_automation_job_preview(
+            would_queue=True,
+            queue_blocked_by="",
+            preview_status="queued",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action="keep",
+            input_path=str(file_path),
+            output_path=queued_output,
+        ),
     )
 
 

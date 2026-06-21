@@ -107,6 +107,8 @@
         .history-badge.would_queue-false { color: var(--muted); border-color: var(--border); }
         .history-badge.review_preflight_ok-true { color: var(--green); border-color: var(--green); }
         .history-badge.review_preflight_ok-false { color: var(--red); border-color: var(--red); }
+        .history-badge.live_review-true { color: var(--yellow); border-color: var(--yellow); }
+        .history-badge.live_review-false { color: var(--green); border-color: var(--green); }
         .history-body, .history-footer { display: grid; gap: 8px; min-width: 0; }
         .history-footer {
             border-top: 1px solid var(--border);
@@ -321,6 +323,14 @@
                         <span>enabled</span>
                     </label>
                 </div>
+                <div class="settings-field settings-full">
+                    <label for="live-review-enabled">Live review encode gate</label>
+                    <label class="settings-check">
+                        <input type="checkbox" id="live-review-enabled">
+                        <span>enabled</span>
+                    </label>
+                    <p class="settings-help">This does not replace originals. Live review encoding can only queue into mapped MediaStatReview folders when dry_run is false, this gate is enabled, the schedule window is open, mapping is found, and preflight passes. It does not delete originals, refresh Plex/Radarr, or override dry_run. Leaving it off is the safe normal state.</p>
+                </div>
                 <div class="settings-field">
                     <label for="automation-token">Automation token</label>
                     <input type="password" id="automation-token" autocomplete="current-password" placeholder="Required to save">
@@ -484,13 +494,28 @@ function renderReadiness(data) {
     const sonarrEnabled = boolValue(sources.sonarr?.enabled);
     const qbitEnabled = boolValue(sources.qbit?.enabled);
     const sabEnabled = boolValue(sources.sab?.enabled);
+    const dryRunEnabled = boolValue(data.dry_run);
+    const liveReviewEnabled = boolValue(data.live_review_enabled);
     const mappings = Array.isArray(data.review_output_mappings) ? data.review_output_mappings : [];
     const schedule = data.schedule || {};
     const scheduleOpen = data.schedule_currently_open;
     const last = data.last_automation_result || {};
+    let liveGateStatus = 'ok';
+    let liveGateText = 'Live review gate locked/off; dry-run remains the safe normal state.';
+    if (dryRunEnabled && liveReviewEnabled) {
+        liveGateStatus = 'warn';
+        liveGateText = 'Live review gate armed, but dry_run still blocks queueing.';
+    } else if (!dryRunEnabled && !liveReviewEnabled) {
+        liveGateStatus = 'blocked';
+        liveGateText = 'dry_run is false and the live review gate is off; live queueing is blocked.';
+    } else if (!dryRunEnabled && liveReviewEnabled) {
+        liveGateStatus = 'warn';
+        liveGateText = 'Live review gate armed; live-review queueing is possible only if schedule, mapping, and preflight pass.';
+    }
     const items = [
         checklistItem(boolValue(data.enabled) ? 'ok' : 'blocked', `Automation endpoint enabled: ${boolText(data.enabled)}`),
-        checklistItem(boolValue(data.dry_run) ? 'ok' : 'blocked', `Dry-run mode: ${boolText(data.dry_run)}`),
+        checklistItem(dryRunEnabled ? 'ok' : 'warn', `Dry-run mode: ${boolText(data.dry_run)}`),
+        checklistItem(liveGateStatus, liveGateText),
         checklistItem(!boolValue(data.allow_arr_sidecar_output) ? 'ok' : 'blocked', `Radarr/Sonarr sidecar output blocked: ${boolText(!boolValue(data.allow_arr_sidecar_output))}`),
         checklistItem((!qbitEnabled && !sabEnabled) ? 'ok' : 'blocked', `qBit/SAB enabled flags: qbit ${boolText(qbitEnabled)}, sab ${boolText(sabEnabled)}`),
         checklistItem((radarrEnabled || sonarrEnabled) ? 'ok' : 'warn', `Radarr/Sonarr sources: radarr ${boolText(radarrEnabled)}, sonarr ${boolText(sonarrEnabled)}`),
@@ -619,6 +644,19 @@ function preflightSummary(item) {
     if (!isBlank(item.planned_parent_writable)) parts.push(`writable ${boolText(item.planned_parent_writable)}`);
     if (!isBlank(item.output_under_review_root)) parts.push(`under_review_root ${boolText(item.output_under_review_root)}`);
     if (!isBlank(item.output_beside_original)) parts.push(`beside_original ${boolText(item.output_beside_original)}`);
+    if (!isBlank(item.movie_library_sidecar_needed)) parts.push(`library_sidecar_needed ${boolText(item.movie_library_sidecar_needed)}`);
+    return parts.join(' / ');
+}
+
+function hasLiveGate(item) {
+    return !isBlank(item.live_review_enabled) || !isBlank(item.live_review_gate_reason);
+}
+
+function liveGateSummary(item) {
+    if (!hasLiveGate(item)) return '';
+    const parts = [];
+    if (!isBlank(item.live_review_enabled)) parts.push(`enabled ${boolText(item.live_review_enabled)}`);
+    if (!isBlank(item.live_review_gate_reason)) parts.push(item.live_review_gate_reason);
     return parts.join(' / ');
 }
 
@@ -694,6 +732,7 @@ function updateScheduleForm(data) {
     document.getElementById('schedule-end').value = normalizeTimeForInput(schedule.end, '06:00');
     document.getElementById('review-output-enabled').checked = boolValue(data.review_output_enabled);
     document.getElementById('review-preflight-enabled').checked = boolValue(data.review_preflight_enabled);
+    document.getElementById('live-review-enabled').checked = boolValue(data.live_review_enabled);
     renderReviewMappings(data);
 }
 
@@ -710,7 +749,8 @@ async function saveAutomationSettings(event) {
         },
         review_output_enabled: document.getElementById('review-output-enabled').checked,
         review_preflight_enabled: document.getElementById('review-preflight-enabled').checked,
-        review_output_mappings: collectReviewMappings()
+        review_output_mappings: collectReviewMappings(),
+        live_review_enabled: document.getElementById('live-review-enabled').checked
     };
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['X-Automation-Token'] = token;
@@ -761,6 +801,8 @@ function testSummaryRows(payload, httpStatus) {
         ['decision/result', [payload.decision || payload.result, payload.error].filter(v => !isBlank(v)).join(' / ')],
         ['reason', payload.reason || payload.error || ''],
         ['dry_run', optionalBoolText(payload.dry_run)],
+        ['live_review_enabled', optionalBoolText(payload.live_review_enabled)],
+        ['live_review_gate_reason', payload.live_review_gate_reason],
         ['queued', optionalBoolText(payload.queued)],
         ['job_id', payload.job_id],
         ['source/event/category', [payload.source, payload.event, payload.category].filter(v => !isBlank(v)).join(' / ')],
@@ -882,6 +924,7 @@ function renderHistory(history) {
                         ${optionalFlagBadge('file_stable', item.file_stable)}
                         ${optionalFlagBadge('review_mapping_found', item.review_mapping_found)}
                         ${optionalFlagBadge('review_preflight_ok', item.review_preflight_ok)}
+                        ${optionalFlagBadge('live_review', item.live_review_enabled)}
                         ${flagBadge('dry_run', item.dry_run)}
                         ${flagBadge('queued', item.queued)}
                         ${flagBadge('ignored', item.ignored)}
@@ -890,6 +933,7 @@ function renderHistory(history) {
                 <div class="history-body">
                     ${historyField('profile', item.profile)}
                     ${hasPreview(item) ? historyField('job_preview', previewSummary(item)) : ''}
+                    ${hasLiveGate(item) ? historyField('live_review_gate', liveGateSummary(item)) : ''}
                     ${hasStability(item) ? historyField('file_stability', stabilitySummary(item)) : ''}
                     ${hasPreflight(item) ? historyField('review_preflight', preflightSummary(item)) : ''}
                     ${item.review_mapping_input_root ? historyField('review_mapping_input_root', item.review_mapping_input_root, 'path-value') : ''}
@@ -914,6 +958,8 @@ async function loadAutomationStatus() {
     addRows(document.getElementById('automation-config'), [
         ['enabled', esc(boolText(data.enabled))],
         ['dry_run', esc(boolText(data.dry_run))],
+        ['live_review_enabled', esc(boolText(data.live_review_enabled))],
+        ['live_review_gate_reason', esc(data.live_review_gate_reason)],
         ['allow_arr_sidecar_output', esc(boolText(data.allow_arr_sidecar_output))],
         ['file_stability_check_enabled', esc(boolText(data.file_stability_check_enabled))],
         ['file_stability_wait_seconds', esc(data.file_stability_wait_seconds)],
@@ -977,6 +1023,8 @@ async function loadAutomationStatus() {
     addRows(document.getElementById('automation-result'), [
         ['decision', displayDecision(result.decision)],
         ['reason', esc(result.reason)],
+        ['live_review_enabled', esc(optionalBoolText(result.live_review_enabled))],
+        ['live_review_gate_reason', esc(result.live_review_gate_reason)],
         ['source/event/category', esc([result.source, result.event, result.category].filter(Boolean).join(' / '))],
         ['profile/post_action', esc([result.profile, result.post_action].filter(Boolean).join(' / '))],
         ['input_path', esc(result.input_path)],
