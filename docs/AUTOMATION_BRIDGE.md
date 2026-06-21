@@ -18,6 +18,7 @@ automation:
   file_stability_wait_seconds: 30
   review_output_enabled: true
   review_output_root: "/media/mediastat-review"
+  review_preflight_enabled: true
   default_profile: high_quality_hevc_qp18
   default_post_action: keep
 
@@ -159,6 +160,21 @@ configuration, the most recent automation decision, and recent decision history.
 The page shows whether automation is enabled, whether dry-run is active, whether
 a token is configured, source policy, and the last request/result summary.
 
+The page also has schedule and review-output controls for automation testing.
+Enter the existing automation token in the password field, set the schedule and
+review output values, and save. Only these whitelisted settings are persisted:
+`schedule.enabled`, `schedule.start`, `schedule.end`, `review_output_enabled`,
+`review_output_root`, and `review_preflight_enabled`.
+
+```text
+/data/automation_settings.json
+```
+
+The token is sent as the `X-Automation-Token` header for the save request. It is
+not displayed, stored in the settings file, or written to automation history.
+The review root must be a non-empty absolute `/media/...` path, must not be `/`
+or `/media`, and should point to deliberately mounted storage with enough space.
+
 The page never renders the token value. It only shows `token_configured` as
 `true` or `false`.
 
@@ -221,17 +237,46 @@ automation:
 ```
 
 MediaStat keeps the normal encoded filename, preserves useful relative library
-folders when possible, and places the planned output under the review root. For
-example, an input under `/media/movies/...` plans output under
-`/media/mediastat-review/movies/...`.
+folders when possible, and places the planned output under the review root. Set
+`review_output_root` from the Automation page to a known mounted storage path,
+preferably Synology-backed, such as `/media/MediaStatReview`.
 
 The original media file remains untouched. The review output path is intended to
 stay outside Radarr, Sonarr, Plex, or other live library folders while automation
-is being tested. MediaStat does not create review directories during dry-run.
+is being tested.
 
 Raw byte values such as `size_before` and `size_after` remain in the JSON
 response and history. The Automation page prefers `size_before_human` and
 `size_after_human` for readability.
+
+## Review output preflight
+
+Accepted, stable dry-run requests run a review/staging output preflight before
+they are shown as queueable. The preflight confirms that the planned output is
+under `review_output_root`, confirms it is not beside the original media file,
+confirms the review root already exists and is a directory, creates the planned
+parent folder under the review root if needed, writes a tiny probe file there,
+then deletes the probe file.
+
+If preflight passes, the dry-run preview can show `would_queue: true` while
+still keeping `queued: false` and `job_id: null`. If preflight fails, the request
+still does not queue anything and the response/history show
+`review_preflight_ok: false`, `queue_blocked_by: "review_preflight_failed"`, and
+a clear `review_preflight_reason`.
+
+Preflight may create folders only under the configured review output root. It
+must not create a live sidecar output beside Radarr/Sonarr media, write into the
+movie or episode library folder, encode media, or change original files.
+MediaStat does not create `review_output_root` automatically; create or mount it
+deliberately before testing. If the root is missing, preflight returns
+`review_preflight_ok: false` with `review_preflight_reason:
+"review output root does not exist"`.
+
+Responses, Last Decision, and history may include fields such as
+`review_preflight_enabled`, `review_output_enabled`, `review_preflight_ok`,
+`review_root`, `planned_parent_path`, `planned_parent_writable`,
+`output_under_review_root`, `output_beside_original`,
+`movie_library_sidecar_needed`, and `write_probe_ok`.
 
 ## Job preview
 
@@ -247,7 +292,7 @@ uses `would_queue: true`, keeps `queued: false`, keeps `job_id: null`, and sets
 
 Unstable files use `would_queue: false` and `queue_blocked_by: "file_unstable"`.
 Ignored or rejected requests remain non-queueing decisions. The preview does not
-create directories, start jobs, encode files, or change scheduler behaviour.
+start jobs, encode files, change original media, or change scheduler behaviour.
 
 For direct HTTP checks, request:
 

@@ -103,6 +103,8 @@
         .history-badge.file_stable-false { color: var(--red); border-color: var(--red); }
         .history-badge.would_queue-true { color: var(--green); border-color: var(--green); }
         .history-badge.would_queue-false { color: var(--muted); border-color: var(--border); }
+        .history-badge.review_preflight_ok-true { color: var(--green); border-color: var(--green); }
+        .history-badge.review_preflight_ok-false { color: var(--red); border-color: var(--red); }
         .history-body, .history-footer { display: grid; gap: 8px; min-width: 0; }
         .history-footer {
             border-top: 1px solid var(--border);
@@ -121,6 +123,43 @@
         .path-value { font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace; }
         .history-empty { color: var(--muted); margin: 0; }
         .status-note { color: var(--muted); margin: 0 0 16px; }
+        .settings-form { display: grid; gap: 14px; }
+        .settings-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(150px, 1fr));
+            gap: 12px;
+            align-items: end;
+        }
+        .settings-field { display: grid; gap: 6px; min-width: 0; }
+        .settings-field label { color: var(--muted); font-weight: 600; font-size: var(--fs-sm); }
+        .settings-field input[type="time"],
+        .settings-field input[type="text"],
+        .settings-field input[type="password"] {
+            min-width: 0;
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            background: var(--bg);
+            color: var(--text);
+            padding: 8px 9px;
+        }
+        .settings-wide { grid-column: span 2; }
+        .settings-help { color: var(--muted); font-size: var(--fs-sm); line-height: 1.35; margin: 0; }
+        .settings-check { display: flex; align-items: center; gap: 8px; min-height: 36px; }
+        .settings-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .settings-actions button {
+            border: 1px solid var(--blue);
+            border-radius: 6px;
+            background: transparent;
+            color: var(--blue);
+            padding: 8px 12px;
+            cursor: pointer;
+        }
+        .settings-actions button:disabled { opacity: 0.6; cursor: wait; }
+        .settings-status { color: var(--muted); margin: 0; overflow-wrap: anywhere; }
+        .settings-status.ok { color: var(--green); }
+        .settings-status.error { color: var(--red); }
         @media (max-width: 900px) {
             .automation-grid {
                 grid-template-columns: 1fr;
@@ -129,6 +168,8 @@
                     "decision"
                     "request";
             }
+            .settings-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .settings-wide { grid-column: 1 / -1; }
         }
         @media (max-width: 560px) {
             main { padding: 0 12px 28px; }
@@ -137,6 +178,9 @@
             .history-header { display: grid; }
             .history-badges { justify-content: flex-start; }
             .history-field { grid-template-columns: 1fr; gap: 3px; }
+            .settings-grid { grid-template-columns: 1fr; }
+            .settings-wide { grid-column: auto; }
+            .settings-actions { display: grid; }
         }
     </style>
 </head>
@@ -165,6 +209,56 @@
             <dl class="automation-kv" id="automation-request"></dl>
         </section>
     </div>
+
+    <section class="automation-panel" style="margin-top:14px">
+        <h2>Automation Settings</h2>
+        <form class="settings-form" id="automation-settings-form">
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="schedule-enabled">Schedule</label>
+                    <label class="settings-check">
+                        <input type="checkbox" id="schedule-enabled">
+                        <span>enabled</span>
+                    </label>
+                </div>
+                <div class="settings-field">
+                    <label for="schedule-start">Start</label>
+                    <input type="time" id="schedule-start" value="02:00" required>
+                </div>
+                <div class="settings-field">
+                    <label for="schedule-end">End</label>
+                    <input type="time" id="schedule-end" value="06:00" required>
+                </div>
+                <div class="settings-field">
+                    <label for="review-output-enabled">Review output</label>
+                    <label class="settings-check">
+                        <input type="checkbox" id="review-output-enabled">
+                        <span>enabled</span>
+                    </label>
+                </div>
+                <div class="settings-field">
+                    <label for="review-preflight-enabled">Review preflight</label>
+                    <label class="settings-check">
+                        <input type="checkbox" id="review-preflight-enabled">
+                        <span>enabled</span>
+                    </label>
+                </div>
+                <div class="settings-field settings-wide">
+                    <label for="review-output-root">Review output root</label>
+                    <input type="text" id="review-output-root" placeholder="/media/MediaStatReview" required>
+                    <p class="settings-help">Review root must be a mounted storage path with enough space, preferably Synology-backed. The root must already exist; MediaStat will not create the root automatically.</p>
+                </div>
+                <div class="settings-field">
+                    <label for="automation-token">Automation token</label>
+                    <input type="password" id="automation-token" autocomplete="current-password" placeholder="Required to save">
+                </div>
+            </div>
+            <div class="settings-actions">
+                <button type="submit" id="automation-settings-save">Save Settings</button>
+                <p class="settings-status" id="automation-settings-status"></p>
+            </div>
+        </form>
+    </section>
 
     <section class="automation-panel" style="margin-top:14px">
         <h2>Recent Automation History</h2>
@@ -331,6 +425,93 @@ function stabilitySummary(item) {
     return parts.join(' / ');
 }
 
+function hasPreflight(item) {
+    return !isBlank(item.review_preflight_ok) ||
+        !isBlank(item.review_preflight_enabled) ||
+        !isBlank(item.review_output_enabled) ||
+        !isBlank(item.review_preflight_reason);
+}
+
+function preflightSummary(item) {
+    if (!hasPreflight(item)) return '';
+    const parts = [
+        `enabled ${optionalBoolText(item.review_preflight_enabled)}`,
+        `review_output ${optionalBoolText(item.review_output_enabled)}`
+    ];
+    if (!isBlank(item.review_preflight_ok)) parts.push(`ok ${boolText(item.review_preflight_ok)}`);
+    if (!isBlank(item.review_preflight_reason)) parts.push(item.review_preflight_reason);
+    if (!isBlank(item.planned_parent_writable)) parts.push(`writable ${boolText(item.planned_parent_writable)}`);
+    if (!isBlank(item.output_under_review_root)) parts.push(`under_review_root ${boolText(item.output_under_review_root)}`);
+    if (!isBlank(item.output_beside_original)) parts.push(`beside_original ${boolText(item.output_beside_original)}`);
+    return parts.join(' / ');
+}
+
+function normalizeTimeForInput(value, fallback) {
+    const text = String(value ?? '').trim();
+    const match = text.match(/^(\d{1,2}):([0-5]\d)$/);
+    if (!match) return fallback;
+    const hour = Math.max(0, Math.min(23, Number(match[1])));
+    return `${String(hour).padStart(2, '0')}:${match[2]}`;
+}
+
+function setSettingsStatus(message, kind = '') {
+    const el = document.getElementById('automation-settings-status');
+    el.className = `settings-status ${kind}`;
+    el.textContent = message || '';
+}
+
+function updateScheduleForm(data) {
+    const schedule = data.schedule || {};
+    document.getElementById('schedule-enabled').checked = boolValue(schedule.enabled);
+    document.getElementById('schedule-start').value = normalizeTimeForInput(schedule.start, '02:00');
+    document.getElementById('schedule-end').value = normalizeTimeForInput(schedule.end, '06:00');
+    document.getElementById('review-output-enabled').checked = boolValue(data.review_output_enabled);
+    document.getElementById('review-preflight-enabled').checked = boolValue(data.review_preflight_enabled);
+    document.getElementById('review-output-root').value = data.review_output_root || '/media/MediaStatReview';
+}
+
+async function saveAutomationSettings(event) {
+    event.preventDefault();
+    const button = document.getElementById('automation-settings-save');
+    const tokenInput = document.getElementById('automation-token');
+    const token = tokenInput.value;
+    const payload = {
+        schedule: {
+            enabled: document.getElementById('schedule-enabled').checked,
+            start: document.getElementById('schedule-start').value,
+            end: document.getElementById('schedule-end').value
+        },
+        review_output_enabled: document.getElementById('review-output-enabled').checked,
+        review_output_root: document.getElementById('review-output-root').value.trim(),
+        review_preflight_enabled: document.getElementById('review-preflight-enabled').checked
+    };
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['X-Automation-Token'] = token;
+    button.disabled = true;
+    setSettingsStatus('Saving...', '');
+    try {
+        const resp = await fetch(`${BASE_PATH}/automation/settings`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(payload)
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+            const detail = body.detail || body.error || `status ${resp.status}`;
+            const message = typeof detail === 'string' ? detail : (detail.error || JSON.stringify(detail));
+            throw new Error(message);
+        }
+        tokenInput.value = '';
+        setSettingsStatus('Automation settings saved', 'ok');
+        await loadAutomationStatus();
+    } catch (err) {
+        setSettingsStatus(err.message || 'Could not save schedule', 'error');
+    } finally {
+        tokenInput.value = '';
+        button.disabled = false;
+    }
+}
+
 function renderHistory(history) {
     const items = Array.isArray(history) ? history : [];
     if (!items.length) {
@@ -346,6 +527,7 @@ function renderHistory(history) {
         const footer = [
             reason ? historyField('error/reason', reason) : '',
             item.stability_reason ? historyField('stability_reason', item.stability_reason) : '',
+            item.review_preflight_reason ? historyField('review_preflight_reason', item.review_preflight_reason) : '',
             warnings ? historyField('warnings', warnings) : ''
         ].join('');
         return `
@@ -359,6 +541,7 @@ function renderHistory(history) {
                         ${historyDecisionBadge(item)}
                         ${optionalFlagBadge('would_queue', previewValue(item, 'would_queue'))}
                         ${optionalFlagBadge('file_stable', item.file_stable)}
+                        ${optionalFlagBadge('review_preflight_ok', item.review_preflight_ok)}
                         ${flagBadge('dry_run', item.dry_run)}
                         ${flagBadge('queued', item.queued)}
                         ${flagBadge('ignored', item.ignored)}
@@ -368,6 +551,7 @@ function renderHistory(history) {
                     ${historyField('profile', item.profile)}
                     ${hasPreview(item) ? historyField('job_preview', previewSummary(item)) : ''}
                     ${hasStability(item) ? historyField('file_stability', stabilitySummary(item)) : ''}
+                    ${hasPreflight(item) ? historyField('review_preflight', preflightSummary(item)) : ''}
                     ${historyField('input_path', item.input_path, 'path-value')}
                     ${historyField('output_path', item.output_path, 'path-value')}
                 </div>
@@ -393,6 +577,8 @@ async function loadAutomationStatus() {
         ['file_stability_wait_seconds', esc(data.file_stability_wait_seconds)],
         ['review_output_enabled', esc(boolText(data.review_output_enabled))],
         ['review_output_root', esc(data.review_output_root)],
+        ['review_preflight_enabled', esc(boolText(data.review_preflight_enabled))],
+        ['schedule', esc([boolText(data.schedule?.enabled), data.schedule_window].filter(v => !isBlank(v)).join(' / '))],
         ['default_profile', esc(data.default_profile)],
         ['default_post_action', esc(data.default_post_action)],
         ['token_configured', esc(boolText(data.token_configured))],
@@ -424,6 +610,23 @@ async function loadAutomationStatus() {
         ['mtime_after', esc(result.mtime_after)],
         ['stability_reason', esc(result.stability_reason)]
     ] : [];
+    const preflightRows = hasPreflight(result) ? [
+        ['review_preflight_ok', esc(optionalBoolText(result.review_preflight_ok))],
+        ['review_preflight_enabled', esc(optionalBoolText(result.review_preflight_enabled))],
+        ['review_output_enabled', esc(optionalBoolText(result.review_output_enabled))],
+        ['review_preflight_reason', esc(result.review_preflight_reason)],
+        ['review_root', esc(result.review_root)],
+        ['review_root_exists', esc(optionalBoolText(result.review_root_exists))],
+        ['review_root_created', esc(optionalBoolText(result.review_root_created))],
+        ['planned_parent_path', esc(result.planned_parent_path)],
+        ['planned_parent_exists', esc(optionalBoolText(result.planned_parent_exists))],
+        ['planned_parent_created', esc(optionalBoolText(result.planned_parent_created))],
+        ['planned_parent_writable', esc(optionalBoolText(result.planned_parent_writable))],
+        ['output_under_review_root', esc(optionalBoolText(result.output_under_review_root))],
+        ['output_beside_original', esc(optionalBoolText(result.output_beside_original))],
+        ['movie_library_sidecar_needed', esc(optionalBoolText(result.movie_library_sidecar_needed))],
+        ['write_probe_ok', esc(optionalBoolText(result.write_probe_ok))]
+    ] : [];
     addRows(document.getElementById('automation-result'), [
         ['decision', displayDecision(result.decision)],
         ['reason', esc(result.reason)],
@@ -433,6 +636,7 @@ async function loadAutomationStatus() {
         ['output_path', esc(result.output_path)],
         ...previewRows,
         ...stabilityRows,
+        ...preflightRows,
         ['job_id', esc(result.job_id)],
         ['timestamp', esc(data.last_automation_timestamp)]
     ]);
@@ -446,6 +650,7 @@ async function loadAutomationStatus() {
     ]);
 
     renderHistory(data.automation_history || []);
+    updateScheduleForm(data);
 
     const sources = data.sources || {};
     const rows = Object.entries(sources).map(([name, cfg]) => `
@@ -474,6 +679,7 @@ loadAutomationStatus().catch(err => {
     document.getElementById('automation-result').innerHTML =
         `<dt>error</dt><dd>${esc(err.message)}</dd>`;
 });
+document.getElementById('automation-settings-form').addEventListener('submit', saveAutomationSettings);
 </script>
 </body>
 </html>

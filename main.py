@@ -70,6 +70,7 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
     "file_stability_wait_seconds": 30,
     "review_output_enabled": True,
     "review_output_root": "/media/mediastat-review",
+    "review_preflight_enabled": True,
     "default_profile": "high_quality_hevc_qp18",
     "default_post_action": "keep",
     "schedule": {
@@ -184,9 +185,96 @@ def _deep_merge_config(default: dict, override: object) -> dict:
     return merged
 
 
+AUTOMATION_SETTINGS_PATH = Path(os.environ.get("AUTOMATION_SETTINGS_PATH", "/data/automation_settings.json"))
+_AUTOMATION_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+_REVIEW_ROOT_SECRET_RE = re.compile(r"(token|secret|password|apikey|api_key)", re.IGNORECASE)
+
+
+def _automation_normalize_time(value: object) -> str | None:
+    text = str(value or "").strip()
+    match = _AUTOMATION_TIME_RE.fullmatch(text)
+    if not match:
+        return None
+    return f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+
+
+def _automation_normalize_review_root(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("review_output_root must be a non-empty absolute path")
+    if any(ch in text for ch in ("\x00", "\r", "\n", "\t")):
+        raise ValueError("review_output_root contains unsafe characters")
+    if _REVIEW_ROOT_SECRET_RE.search(text):
+        raise ValueError("review_output_root must not contain token or secret values")
+    if "://" in text or "\\" in text or "//" in text or any(ch in text for ch in ("*", "?", "<", ">", "|")):
+        raise ValueError("review_output_root contains unsafe characters")
+    if not text.startswith("/"):
+        raise ValueError("review_output_root must be an absolute path")
+    parts = [part for part in text.split("/") if part]
+    if any(part in (".", "..") for part in parts):
+        raise ValueError("review_output_root must not contain parent traversal")
+    normalized = "/" + "/".join(parts)
+    if normalized in ("/", "/media"):
+        raise ValueError("review_output_root must be below /media, not / or /media")
+    if not normalized.startswith("/media/"):
+        raise ValueError("review_output_root must start with /media/")
+    return normalized.rstrip("/")
+
+
+def _automation_settings_override_from_mapping(data: object, *, strict: bool = False) -> dict:
+    if not isinstance(data, dict):
+        return {}
+    clean: dict = {}
+    schedule = data.get("schedule")
+    if isinstance(schedule, dict):
+        clean_schedule: dict = {}
+        if "enabled" in schedule:
+            clean_schedule["enabled"] = bool(schedule.get("enabled"))
+        for key in ("start", "end"):
+            if key in schedule:
+                normalized = _automation_normalize_time(schedule.get(key))
+                if normalized:
+                    clean_schedule[key] = normalized
+                elif strict:
+                    raise ValueError("schedule start and end must use HH:MM time")
+        if clean_schedule:
+            clean["schedule"] = clean_schedule
+    elif "schedule" in data and strict:
+        raise ValueError("schedule settings must be an object")
+
+    for key in ("review_output_enabled", "review_preflight_enabled"):
+        if key in data:
+            clean[key] = bool(data.get(key))
+    if "review_output_root" in data:
+        clean["review_output_root"] = _automation_normalize_review_root(data.get("review_output_root"))
+    return clean
+
+
+def _load_automation_settings_overrides() -> dict:
+    if not AUTOMATION_SETTINGS_PATH.exists():
+        return {}
+    try:
+        with open(AUTOMATION_SETTINGS_PATH, encoding="utf-8") as f:
+            return _automation_settings_override_from_mapping(json.load(f))
+    except Exception as exc:
+        log.warning("Automation settings could not be read from %s: %s", AUTOMATION_SETTINGS_PATH, exc)
+        return {}
+
+
+def _save_automation_settings_overrides(settings: dict) -> None:
+    payload = _automation_settings_override_from_mapping(settings, strict=True)
+    if not payload:
+        raise ValueError("automation settings are invalid")
+    AUTOMATION_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(AUTOMATION_SETTINGS_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+
+
 AUTOMATION_CONFIG: dict = _deep_merge_config(
     DEFAULT_AUTOMATION_CONFIG, _config.get("automation") or {}
 )
+AUTOMATION_CONFIG = _deep_merge_config(AUTOMATION_CONFIG, _load_automation_settings_overrides())
 AUTOMATION_HISTORY_PATH = Path("/data/automation_history.jsonl")
 AUTOMATION_HISTORY_LIMIT = 100
 
@@ -4012,6 +4100,143 @@ def _automation_output_candidate(file_path: Path, config: dict) -> Path:
     return candidate
 
 
+def _automation_resolve_loose(path: Path) -> Path:
+    try:
+        return path.expanduser().resolve(strict=False)
+    except OSError:
+        return path.expanduser().absolute()
+
+
+def _automation_path_under(path: Path, root: Path) -> bool:
+    resolved_path = _automation_resolve_loose(path)
+    resolved_root = _automation_resolve_loose(root)
+    return resolved_path == resolved_root or resolved_path.is_relative_to(resolved_root)
+
+
+def _automation_same_parent(first: Path, second: Path) -> bool:
+    return _automation_resolve_loose(first.parent) == _automation_resolve_loose(second.parent)
+
+
+def _automation_review_output_preflight(file_path: Path, output_path: Path | None) -> dict:
+    enabled = bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True))
+    review_output_enabled = bool(AUTOMATION_CONFIG.get("review_output_enabled", True))
+    review_root_value = str(AUTOMATION_CONFIG.get("review_output_root") or "").strip()
+    planned_parent = output_path.parent if output_path else None
+    result = {
+        "review_preflight_enabled": enabled,
+        "review_output_enabled": review_output_enabled,
+        "review_preflight_ok": None,
+        "review_preflight_reason": "",
+        "review_root": review_root_value,
+        "review_root_exists": None,
+        "review_root_created": False,
+        "planned_parent_path": str(planned_parent or ""),
+        "planned_parent_exists": None,
+        "planned_parent_created": False,
+        "planned_parent_writable": None,
+        "output_under_review_root": None,
+        "output_beside_original": None,
+        "movie_library_sidecar_needed": None,
+        "write_probe_ok": None,
+    }
+    if not enabled:
+        result["review_preflight_ok"] = True
+        result["review_preflight_reason"] = "review output preflight disabled"
+        return result
+    if not review_output_enabled:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = "review output is disabled"
+        result["movie_library_sidecar_needed"] = True
+        return result
+    if output_path is None:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = "planned output path is missing"
+        return result
+    if not review_root_value:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = "review output root is not configured"
+        result["movie_library_sidecar_needed"] = True
+        return result
+
+    try:
+        review_root_value = _automation_normalize_review_root(review_root_value)
+    except ValueError as exc:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = str(exc)
+        result["movie_library_sidecar_needed"] = True
+        return result
+    result["review_root"] = review_root_value
+    review_root = Path(review_root_value)
+    output_under_review_root = _automation_path_under(output_path, review_root)
+    output_beside_original = _automation_same_parent(output_path, file_path)
+    result["output_under_review_root"] = output_under_review_root
+    result["output_beside_original"] = output_beside_original
+    result["movie_library_sidecar_needed"] = output_beside_original or not output_under_review_root
+    if output_beside_original:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = "planned output would be beside the original media file"
+        return result
+    if not output_under_review_root:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = "planned output is outside the review output root"
+        return result
+
+    try:
+        review_root_exists = review_root.exists()
+        result["review_root_exists"] = review_root_exists
+        if review_root_exists and not review_root.is_dir():
+            result["review_preflight_ok"] = False
+            result["review_preflight_reason"] = "review output root exists but is not a directory"
+            return result
+        if not review_root_exists:
+            result["review_preflight_ok"] = False
+            result["review_preflight_reason"] = "review output root does not exist"
+            return result
+
+        assert planned_parent is not None
+        planned_parent_exists = planned_parent.exists()
+        result["planned_parent_exists"] = planned_parent_exists
+        if planned_parent_exists and not planned_parent.is_dir():
+            result["review_preflight_ok"] = False
+            result["review_preflight_reason"] = "planned output parent exists but is not a directory"
+            return result
+        if not planned_parent_exists:
+            planned_parent.mkdir(parents=True, exist_ok=True)
+            result["planned_parent_created"] = True
+    except OSError as exc:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = f"could not prepare review output folder: {exc.strerror or exc.__class__.__name__}"
+        return result
+
+    probe_path = planned_parent / f".mediastat-preflight-{secrets.token_hex(8)}.tmp"
+    cleanup_error = ""
+    try:
+        with open(probe_path, "w", encoding="utf-8") as f:
+            f.write("ok\n")
+        result["write_probe_ok"] = True
+        result["planned_parent_writable"] = True
+    except OSError as exc:
+        result["write_probe_ok"] = False
+        result["planned_parent_writable"] = False
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = f"could not write review output probe: {exc.strerror or exc.__class__.__name__}"
+        return result
+    finally:
+        if probe_path.exists():
+            try:
+                probe_path.unlink()
+            except OSError as exc:
+                cleanup_error = exc.strerror or exc.__class__.__name__
+    if cleanup_error:
+        result["review_preflight_ok"] = False
+        result["review_preflight_reason"] = f"could not remove review output probe: {cleanup_error}"
+        return result
+
+    result["review_preflight_ok"] = True
+    result["review_preflight_reason"] = "review output preflight passed"
+    return result
+
+
 def _queue_file_encode(file_path: Path, config: dict, output_path: Path | None = None) -> str | None:
     """Create and enqueue one encode job. Returns job_id or None if ffmpeg missing."""
     candidate = output_path or _encode_output_candidate(file_path, config)
@@ -4312,6 +4537,21 @@ def _sanitize_automation_history_record(record: object) -> dict | None:
         "mtime_before": str(record.get("mtime_before") or ""),
         "mtime_after": str(record.get("mtime_after") or ""),
         "stability_reason": str(record.get("stability_reason") or ""),
+        "review_preflight_enabled": _automation_bool_or_none(record.get("review_preflight_enabled")),
+        "review_output_enabled": _automation_bool_or_none(record.get("review_output_enabled")),
+        "review_preflight_ok": _automation_bool_or_none(record.get("review_preflight_ok")),
+        "review_preflight_reason": str(record.get("review_preflight_reason") or ""),
+        "review_root": str(record.get("review_root") or ""),
+        "review_root_exists": _automation_bool_or_none(record.get("review_root_exists")),
+        "review_root_created": _automation_bool_or_none(record.get("review_root_created")),
+        "planned_parent_path": str(record.get("planned_parent_path") or ""),
+        "planned_parent_exists": _automation_bool_or_none(record.get("planned_parent_exists")),
+        "planned_parent_created": _automation_bool_or_none(record.get("planned_parent_created")),
+        "planned_parent_writable": _automation_bool_or_none(record.get("planned_parent_writable")),
+        "output_under_review_root": _automation_bool_or_none(record.get("output_under_review_root")),
+        "output_beside_original": _automation_bool_or_none(record.get("output_beside_original")),
+        "movie_library_sidecar_needed": _automation_bool_or_none(record.get("movie_library_sidecar_needed")),
+        "write_probe_ok": _automation_bool_or_none(record.get("write_probe_ok")),
     }
     _automation_attach_preview(clean, _automation_preview_from_record(record))
     return clean
@@ -4356,6 +4596,17 @@ def _read_automation_history(limit: int = AUTOMATION_HISTORY_LIMIT) -> list[dict
 
 def _automation_status_payload() -> dict:
     sources = _automation_source_policy()
+    schedule = AUTOMATION_CONFIG.get("schedule") or {}
+    if not isinstance(schedule, dict):
+        schedule = {}
+    public_schedule = {
+        "enabled": bool(schedule.get("enabled", False)),
+        "start": str(schedule.get("start") or ""),
+        "end": str(schedule.get("end") or ""),
+        "mode": str(schedule.get("mode") or ""),
+        "do_not_start_if_less_than_minutes_left": schedule.get("do_not_start_if_less_than_minutes_left"),
+        "window": _automation_schedule_window(schedule),
+    }
     return {
         "enabled": bool(AUTOMATION_CONFIG.get("enabled")),
         "dry_run": bool(AUTOMATION_CONFIG.get("dry_run", True)),
@@ -4364,6 +4615,9 @@ def _automation_status_payload() -> dict:
         "file_stability_wait_seconds": _automation_stability_wait_seconds(),
         "review_output_enabled": bool(AUTOMATION_CONFIG.get("review_output_enabled", True)),
         "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
+        "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
+        "schedule": public_schedule,
+        "schedule_window": public_schedule["window"],
         "default_profile": AUTOMATION_CONFIG.get("default_profile"),
         "default_post_action": AUTOMATION_CONFIG.get("default_post_action"),
         "token_configured": bool(AUTOMATION_CONFIG.get("token")),
@@ -4425,6 +4679,21 @@ def _remember_automation_result(decision: str, reason: str = "", **summary: obje
         "mtime_before": str(summary.get("mtime_before") or ""),
         "mtime_after": str(summary.get("mtime_after") or ""),
         "stability_reason": str(summary.get("stability_reason") or ""),
+        "review_preflight_enabled": _automation_bool_or_none(summary.get("review_preflight_enabled")),
+        "review_output_enabled": _automation_bool_or_none(summary.get("review_output_enabled")),
+        "review_preflight_ok": _automation_bool_or_none(summary.get("review_preflight_ok")),
+        "review_preflight_reason": str(summary.get("review_preflight_reason") or ""),
+        "review_root": str(summary.get("review_root") or ""),
+        "review_root_exists": _automation_bool_or_none(summary.get("review_root_exists")),
+        "review_root_created": _automation_bool_or_none(summary.get("review_root_created")),
+        "planned_parent_path": str(summary.get("planned_parent_path") or ""),
+        "planned_parent_exists": _automation_bool_or_none(summary.get("planned_parent_exists")),
+        "planned_parent_created": _automation_bool_or_none(summary.get("planned_parent_created")),
+        "planned_parent_writable": _automation_bool_or_none(summary.get("planned_parent_writable")),
+        "output_under_review_root": _automation_bool_or_none(summary.get("output_under_review_root")),
+        "output_beside_original": _automation_bool_or_none(summary.get("output_beside_original")),
+        "movie_library_sidecar_needed": _automation_bool_or_none(summary.get("movie_library_sidecar_needed")),
+        "write_probe_ok": _automation_bool_or_none(summary.get("write_probe_ok")),
     }
     _automation_attach_preview(clean, _automation_preview_from_record(summary))
     _AUTOMATION_LAST["result"] = clean
@@ -4479,6 +4748,7 @@ def _automation_response(
     warnings: list[str],
     reason: str = "",
     stability: dict | None = None,
+    preflight: dict | None = None,
     preview: dict | None = None,
 ) -> dict:
     payload = {
@@ -4497,6 +4767,8 @@ def _automation_response(
     }
     if stability:
         payload.update(stability)
+    if preflight:
+        payload.update(preflight)
     if ignored:
         decision = "ignored"
     elif queued:
@@ -4595,9 +4867,92 @@ def _automation_auth(request: Request) -> None:
         _automation_reject("automation token is invalid", status_code=403)
 
 
+def _automation_settings_auth(request: Request) -> None:
+    if not AUTOMATION_CONFIG.get("enabled"):
+        raise HTTPException(status_code=403, detail={"error": "automation is disabled"})
+    expected = str(AUTOMATION_CONFIG.get("token") or "")
+    if not expected:
+        raise HTTPException(status_code=403, detail={"error": "automation token is not configured"})
+    supplied = request.headers.get("X-Automation-Token") or ""
+    if not supplied:
+        raise HTTPException(status_code=403, detail={"error": "automation token is missing"})
+    if not secrets.compare_digest(supplied, expected):
+        raise HTTPException(status_code=403, detail={"error": "automation token is invalid"})
+
+
+def _validate_automation_schedule_settings(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise HTTPException(status_code=400, detail={"error": "schedule settings must be an object"})
+    start = _automation_normalize_time(value.get("start"))
+    end = _automation_normalize_time(value.get("end"))
+    if not start or not end:
+        raise HTTPException(status_code=400, detail={"error": "schedule start and end must use HH:MM time"})
+    return {
+        "enabled": bool(value.get("enabled", False)),
+        "start": start,
+        "end": end,
+    }
+
+
+def _validate_automation_review_settings(value: dict) -> dict:
+    try:
+        review_output_root = _automation_normalize_review_root(value.get("review_output_root"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    return {
+        "review_output_enabled": bool(value.get("review_output_enabled", False)),
+        "review_output_root": review_output_root,
+        "review_preflight_enabled": bool(value.get("review_preflight_enabled", False)),
+    }
+
+
 @app.get("/automation/status")
 async def automation_status():
     return _automation_status_payload()
+
+
+@app.post("/automation/settings")
+async def automation_settings(request: Request):
+    _automation_settings_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail={"error": "invalid JSON body"})
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail={"error": "invalid JSON body"})
+
+    schedule_settings = _validate_automation_schedule_settings(body.get("schedule"))
+    review_settings = _validate_automation_review_settings(body)
+    settings_payload = {"schedule": schedule_settings, **review_settings}
+    try:
+        _save_automation_settings_overrides(settings_payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    except Exception as exc:
+        log.warning("Automation settings could not be saved to %s: %s", AUTOMATION_SETTINGS_PATH, exc)
+        raise HTTPException(status_code=500, detail={"error": "automation settings could not be saved"})
+
+    current_schedule = AUTOMATION_CONFIG.get("schedule") or {}
+    if not isinstance(current_schedule, dict):
+        current_schedule = {}
+    AUTOMATION_CONFIG["schedule"] = _deep_merge_config(current_schedule, schedule_settings)
+    for key, value in review_settings.items():
+        AUTOMATION_CONFIG[key] = value
+    schedule = AUTOMATION_CONFIG["schedule"]
+    return {
+        "ok": True,
+        "schedule": {
+            "enabled": bool(schedule.get("enabled", False)),
+            "start": str(schedule.get("start") or ""),
+            "end": str(schedule.get("end") or ""),
+            "mode": str(schedule.get("mode") or ""),
+            "do_not_start_if_less_than_minutes_left": schedule.get("do_not_start_if_less_than_minutes_left"),
+            "window": _automation_schedule_window(schedule),
+        },
+        "review_output_enabled": bool(AUTOMATION_CONFIG.get("review_output_enabled", True)),
+        "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
+        "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
+    }
 
 
 @app.get("/automation", response_class=HTMLResponse)
@@ -4777,10 +5132,15 @@ async def automation_queue(request: Request):
         )
 
     if dry_run:
+        preflight = await asyncio.to_thread(_automation_review_output_preflight, file_path, output_path)
+        preflight_ok = preflight.get("review_preflight_ok") is not False
+        preflight_reason = str(preflight.get("review_preflight_reason") or "")
+        if not preflight_ok and preflight_reason:
+            warnings.append(preflight_reason)
         preview = _automation_job_preview(
-            would_queue=True,
-            queue_blocked_by="dry_run",
-            preview_status="would_queue",
+            would_queue=preflight_ok,
+            queue_blocked_by="dry_run" if preflight_ok else "review_preflight_failed",
+            preview_status="would_queue" if preflight_ok else "blocked_review_preflight",
             source=source,
             event=event,
             profile=profile_name,
@@ -4796,7 +5156,8 @@ async def automation_queue(request: Request):
             queued=False, ignored=False, dry_run=True, job_id=None,
             source=source, event=event, category=category, profile=profile_name,
             post_action="keep", input_path=str(file_path), output_path=str(output_path),
-            warnings=warnings, stability=stability, preview=preview,
+            warnings=warnings, reason="" if preflight_ok else preflight_reason,
+            stability=stability, preflight=preflight, preview=preview,
         )
 
     if not shutil.which("ffmpeg"):
