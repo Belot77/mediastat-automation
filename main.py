@@ -4726,6 +4726,7 @@ def _automation_status_payload() -> dict:
     schedule = AUTOMATION_CONFIG.get("schedule") or {}
     if not isinstance(schedule, dict):
         schedule = {}
+    schedule_preview = _automation_schedule_preview()
     public_schedule = {
         "enabled": bool(schedule.get("enabled", False)),
         "start": str(schedule.get("start") or ""),
@@ -4747,6 +4748,8 @@ def _automation_status_payload() -> dict:
         "allowed_roots": [str(root) for root in ALLOWED_ROOTS],
         "schedule": public_schedule,
         "schedule_window": public_schedule["window"],
+        "schedule_currently_open": schedule_preview["schedule_currently_open"],
+        "schedule_reason": schedule_preview["schedule_reason"],
         "default_profile": AUTOMATION_CONFIG.get("default_profile"),
         "default_post_action": AUTOMATION_CONFIG.get("default_post_action"),
         "token_configured": bool(AUTOMATION_CONFIG.get("token")),

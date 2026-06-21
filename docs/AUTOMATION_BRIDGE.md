@@ -183,6 +183,19 @@ settings endpoint.
 The page never renders the token value. It only shows `token_configured` as
 `true` or `false`.
 
+### Mapping / Preflight Test helper
+
+The Automation page includes a Mapping / Preflight Test helper for one-file
+dry-run checks. Enter a media path, choose `radarr` or `sonarr`, leave
+`post_action` as `keep`, enter the automation token in the password field, and
+run the test. The helper calls the existing `/automation/queue` endpoint and
+then clears the password field.
+
+The test may record automation history and may run the review-output preflight,
+but in dry-run mode it must not encode media or create a live job. A safe dry-run
+mapping/preflight result should show `dry_run: true`, `queued: false`, and
+`job_id: null`.
+
 ## Automation history
 
 Every automation decision is appended to:
@@ -250,11 +263,13 @@ mapping's `review_root`. For example, an input below `/media/movies` can be
 planned below `/media/MediaStatReview/movies` while keeping the movie folder
 structure.
 
-The old single `review_output_root` remains visible for compatibility, but V1
-dry-run planning prefers explicit `review_output_mappings`. If no mapping
-matches the input path, MediaStat does not silently fall back to the global root;
-the dry-run preview is blocked with `queue_blocked_by:
-"review_mapping_missing"` and `preview_status: "blocked_review_mapping"`.
+The old single `review_output_root` remains visible as a legacy compatibility
+value, but it is not the recommended review-output system once
+`review_output_mappings` are configured. V1 dry-run planning prefers explicit
+per-root mappings. If no mapping matches the input path, MediaStat does not
+silently fall back to the global root; the dry-run preview is blocked with
+`queue_blocked_by: "review_mapping_missing"` and `preview_status:
+"blocked_review_mapping"`.
 
 The original media file remains untouched. The review output path is intended to
 stay outside Radarr, Sonarr, Plex, or other live library folders while automation

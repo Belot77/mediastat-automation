@@ -136,7 +136,8 @@
         .settings-field label { color: var(--muted); font-weight: 600; font-size: var(--fs-sm); }
         .settings-field input[type="time"],
         .settings-field input[type="text"],
-        .settings-field input[type="password"] {
+        .settings-field input[type="password"],
+        .settings-field select {
             min-width: 0;
             width: 100%;
             box-sizing: border-box;
@@ -185,6 +186,53 @@
         .settings-status { color: var(--muted); margin: 0; overflow-wrap: anywhere; }
         .settings-status.ok { color: var(--green); }
         .settings-status.error { color: var(--red); }
+        .legacy-note {
+            display: block;
+            color: var(--muted);
+            font-size: var(--fs-sm);
+            line-height: 1.35;
+            margin-top: 4px;
+        }
+        .checklist-list { display: grid; gap: 8px; }
+        .checklist-item {
+            display: grid;
+            grid-template-columns: 92px minmax(0, 1fr);
+            gap: 10px;
+            align-items: start;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            background: rgba(255,255,255,0.025);
+            padding: 9px 10px;
+            min-width: 0;
+        }
+        .checklist-status {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            font-size: var(--fs-sm);
+            justify-self: start;
+            padding: 2px 8px;
+            text-transform: uppercase;
+        }
+        .checklist-status.ok { color: var(--green); border-color: var(--green); }
+        .checklist-status.warn { color: var(--yellow); border-color: var(--yellow); }
+        .checklist-status.blocked { color: var(--red); border-color: var(--red); }
+        .checklist-text { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+        .test-grid {
+            display: grid;
+            grid-template-columns: minmax(180px, 1.1fr) minmax(120px, 0.55fr) minmax(120px, 0.55fr) minmax(160px, 0.7fr);
+            gap: 12px;
+            align-items: end;
+        }
+        .test-result { margin-top: 14px; display: grid; gap: 10px; }
+        .result-banner {
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 12px;
+            overflow-wrap: anywhere;
+        }
+        .result-banner.safe { color: var(--green); border-color: var(--green); }
+        .result-banner.blocked { color: var(--red); border-color: var(--red); }
+        .result-banner.neutral { color: var(--muted); }
         @media (max-width: 900px) {
             .automation-grid {
                 grid-template-columns: 1fr;
@@ -194,6 +242,7 @@
                     "request";
             }
             .settings-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
+            .test-grid { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
             .settings-wide { grid-column: 1 / -1; }
         }
         @media (max-width: 560px) {
@@ -204,10 +253,12 @@
             .history-badges { justify-content: flex-start; }
             .history-field { grid-template-columns: 1fr; gap: 3px; }
             .settings-grid { grid-template-columns: 1fr; }
+            .test-grid { grid-template-columns: 1fr; }
             .settings-wide { grid-column: auto; }
             .settings-full { grid-column: auto; }
             .mapping-row { grid-template-columns: 1fr; }
             .settings-actions { display: grid; }
+            .checklist-item { grid-template-columns: 1fr; }
         }
     </style>
 </head>
@@ -286,6 +337,51 @@
                 <p class="settings-status" id="automation-settings-status"></p>
             </div>
         </form>
+    </section>
+
+    <section class="automation-panel" style="margin-top:14px">
+        <h2>Readiness Checklist</h2>
+        <p class="settings-help">Display-only safety checks for dry-run automation testing.</p>
+        <div id="automation-readiness" class="checklist-list" style="margin-top:12px"></div>
+    </section>
+
+    <section class="automation-panel" style="margin-top:14px">
+        <h2>Mapping / Preflight Test</h2>
+        <p class="settings-help">Runs the existing automation queue endpoint in dry-run mode for one path. This can record automation history, but it should not queue or encode.</p>
+        <form class="settings-form" id="automation-test-form" style="margin-top:12px">
+            <div class="test-grid">
+                <div class="settings-field settings-wide">
+                    <label for="test-path">Input path</label>
+                    <input type="text" id="test-path" placeholder="/media/movies/MovieExample/MovieExample.mkv" required>
+                </div>
+                <div class="settings-field">
+                    <label for="test-source">Source</label>
+                    <select id="test-source">
+                        <option value="radarr">radarr</option>
+                        <option value="sonarr">sonarr</option>
+                    </select>
+                </div>
+                <div class="settings-field">
+                    <label for="test-event">Event</label>
+                    <select id="test-event">
+                        <option value="import">import</option>
+                    </select>
+                </div>
+                <div class="settings-field">
+                    <label for="test-profile">Profile</label>
+                    <input type="text" id="test-profile" value="high_quality_hevc_qp18">
+                </div>
+                <div class="settings-field settings-wide">
+                    <label for="test-token">Automation token</label>
+                    <input type="password" id="test-token" autocomplete="current-password" placeholder="Required for test">
+                </div>
+            </div>
+            <div class="settings-actions">
+                <button type="submit" id="automation-test-run">Run Dry-Run Test</button>
+                <p class="settings-status" id="automation-test-status"></p>
+            </div>
+        </form>
+        <div id="automation-test-result" class="test-result"></div>
     </section>
 
     <section class="automation-panel" style="margin-top:14px">
@@ -370,6 +466,53 @@ function addRows(el, rows) {
     el.innerHTML = rows.map(([label, value]) =>
         `<dt>${esc(label)}</dt><dd>${value || '<span style="color:var(--muted)">none</span>'}</dd>`
     ).join('');
+}
+
+function checklistItem(status, text) {
+    const safeStatus = ['ok', 'warn', 'blocked'].includes(status) ? status : 'warn';
+    return `
+        <div class="checklist-item">
+            <div class="checklist-status ${safeStatus}">${esc(safeStatus)}</div>
+            <div class="checklist-text">${esc(text)}</div>
+        </div>
+    `;
+}
+
+function renderReadiness(data) {
+    const sources = data.sources || {};
+    const radarrEnabled = boolValue(sources.radarr?.enabled);
+    const sonarrEnabled = boolValue(sources.sonarr?.enabled);
+    const qbitEnabled = boolValue(sources.qbit?.enabled);
+    const sabEnabled = boolValue(sources.sab?.enabled);
+    const mappings = Array.isArray(data.review_output_mappings) ? data.review_output_mappings : [];
+    const schedule = data.schedule || {};
+    const scheduleOpen = data.schedule_currently_open;
+    const last = data.last_automation_result || {};
+    const items = [
+        checklistItem(boolValue(data.enabled) ? 'ok' : 'blocked', `Automation endpoint enabled: ${boolText(data.enabled)}`),
+        checklistItem(boolValue(data.dry_run) ? 'ok' : 'blocked', `Dry-run mode: ${boolText(data.dry_run)}`),
+        checklistItem(!boolValue(data.allow_arr_sidecar_output) ? 'ok' : 'blocked', `Radarr/Sonarr sidecar output blocked: ${boolText(!boolValue(data.allow_arr_sidecar_output))}`),
+        checklistItem((!qbitEnabled && !sabEnabled) ? 'ok' : 'blocked', `qBit/SAB enabled flags: qbit ${boolText(qbitEnabled)}, sab ${boolText(sabEnabled)}`),
+        checklistItem((radarrEnabled || sonarrEnabled) ? 'ok' : 'warn', `Radarr/Sonarr sources: radarr ${boolText(radarrEnabled)}, sonarr ${boolText(sonarrEnabled)}`),
+        checklistItem(boolValue(data.review_output_enabled) ? 'ok' : 'blocked', `Review output enabled: ${boolText(data.review_output_enabled)}`),
+        checklistItem(mappings.length ? 'ok' : 'blocked', `Review output mappings configured: ${mappings.length}`),
+        checklistItem(boolValue(data.review_preflight_enabled) ? 'ok' : 'warn', `Review preflight enabled: ${boolText(data.review_preflight_enabled)}`),
+        checklistItem(boolValue(data.token_configured) ? 'ok' : 'warn', `Automation token configured: ${boolText(data.token_configured)}`)
+    ];
+    if (boolValue(schedule.enabled)) {
+        const state = isBlank(scheduleOpen) ? 'unknown' : boolText(scheduleOpen);
+        const status = isBlank(scheduleOpen) ? 'warn' : (boolValue(scheduleOpen) ? 'ok' : 'warn');
+        items.push(checklistItem(status, `Schedule window ${data.schedule_window || schedule.window || 'unset'} currently open: ${state}. ${data.schedule_reason || ''}`.trim()));
+    } else {
+        items.push(checklistItem('warn', 'Schedule is disabled for automation preview.'));
+    }
+    if (!isBlank(last.review_preflight_ok)) {
+        const status = boolValue(last.review_preflight_ok) ? 'ok' : 'blocked';
+        items.push(checklistItem(status, `Last preflight result: ${boolText(last.review_preflight_ok)}${last.review_preflight_reason ? ` / ${last.review_preflight_reason}` : ''}`));
+    } else {
+        items.push(checklistItem('warn', 'No preflight result recorded yet.'));
+    }
+    document.getElementById('automation-readiness').innerHTML = items.join('');
 }
 
 function displayDecision(decision) {
@@ -596,6 +739,117 @@ async function saveAutomationSettings(event) {
     }
 }
 
+function setTestStatus(message, kind = '') {
+    const el = document.getElementById('automation-test-status');
+    el.className = `settings-status ${kind}`;
+    el.textContent = message || '';
+}
+
+function testPayloadFromBody(body) {
+    if (body && typeof body.detail === 'object' && body.detail !== null) {
+        return body.detail;
+    }
+    if (body && typeof body === 'object') {
+        return body;
+    }
+    return {};
+}
+
+function testSummaryRows(payload, httpStatus) {
+    return [
+        ['http_status', httpStatus],
+        ['decision/result', [payload.decision || payload.result, payload.error].filter(v => !isBlank(v)).join(' / ')],
+        ['reason', payload.reason || payload.error || ''],
+        ['dry_run', optionalBoolText(payload.dry_run)],
+        ['queued', optionalBoolText(payload.queued)],
+        ['job_id', payload.job_id],
+        ['source/event/category', [payload.source, payload.event, payload.category].filter(v => !isBlank(v)).join(' / ')],
+        ['profile/post_action', [payload.profile, payload.post_action].filter(v => !isBlank(v)).join(' / ')],
+        ['input_path', payload.input_path],
+        ['output_path', payload.output_path],
+        ['review_mapping_found', optionalBoolText(payload.review_mapping_found)],
+        ['review_mapping_input_root', payload.review_mapping_input_root],
+        ['review_mapping_review_root', payload.review_mapping_review_root],
+        ['review_mapping_reason', payload.review_mapping_reason],
+        ['review_preflight_ok', optionalBoolText(payload.review_preflight_ok)],
+        ['review_preflight_reason', payload.review_preflight_reason],
+        ['output_under_review_root', optionalBoolText(payload.output_under_review_root)],
+        ['output_beside_original', optionalBoolText(payload.output_beside_original)],
+        ['movie_library_sidecar_needed', optionalBoolText(payload.movie_library_sidecar_needed)],
+        ['write_probe_ok', optionalBoolText(payload.write_probe_ok)],
+        ['would_queue', optionalBoolText(previewValue(payload, 'would_queue'))],
+        ['queue_blocked_by', previewValue(payload, 'queue_blocked_by')],
+        ['preview_status', previewValue(payload, 'preview_status')],
+        ['schedule_window', previewValue(payload, 'schedule_window')],
+        ['schedule_currently_open', optionalBoolText(previewValue(payload, 'schedule_currently_open'))],
+        ['schedule_reason', previewValue(payload, 'schedule_reason')]
+    ];
+}
+
+function isSafeDryRunResult(payload) {
+    return boolValue(payload.dry_run) &&
+        !boolValue(payload.queued) &&
+        isBlank(payload.job_id) &&
+        payload.review_mapping_found === true &&
+        payload.review_preflight_ok === true &&
+        payload.output_under_review_root === true &&
+        payload.output_beside_original === false &&
+        payload.movie_library_sidecar_needed === false &&
+        payload.write_probe_ok === true;
+}
+
+function renderAutomationTestResult(payload, httpStatus, ok) {
+    const safe = ok && isSafeDryRunResult(payload);
+    const status = safe ? 'safe' : (ok ? 'neutral' : 'blocked');
+    const title = safe
+        ? 'Dry-run mapping/preflight passed. queued=false and job_id=null.'
+        : (ok ? 'Dry-run response returned. Review mapping/preflight fields below.' : 'Request was rejected or failed.');
+    const rows = testSummaryRows(payload, httpStatus);
+    document.getElementById('automation-test-result').innerHTML = `
+        <div class="result-banner ${status}">${esc(title)}</div>
+        <dl class="automation-kv">${rows.map(([label, value]) =>
+            `<dt>${esc(label)}</dt><dd>${displayValue(value)}</dd>`
+        ).join('')}</dl>
+    `;
+}
+
+async function runAutomationDryRunTest(event) {
+    event.preventDefault();
+    const button = document.getElementById('automation-test-run');
+    const tokenInput = document.getElementById('test-token');
+    const token = tokenInput.value;
+    const body = {
+        source: document.getElementById('test-source').value,
+        event: document.getElementById('test-event').value,
+        path: document.getElementById('test-path').value.trim(),
+        profile: document.getElementById('test-profile').value.trim() || 'high_quality_hevc_qp18',
+        post_action: 'keep'
+    };
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['X-Automation-Token'] = token;
+
+    button.disabled = true;
+    setTestStatus('Running dry-run test...', '');
+    try {
+        const resp = await fetch(`${BASE_PATH}/automation/queue`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body)
+        });
+        const responseBody = await resp.json().catch(() => ({}));
+        const payload = testPayloadFromBody(responseBody);
+        renderAutomationTestResult(payload, resp.status, resp.ok);
+        setTestStatus(resp.ok ? 'Dry-run test complete' : 'Dry-run test returned an error response', resp.ok ? 'ok' : 'error');
+        await loadAutomationStatus();
+    } catch (err) {
+        renderAutomationTestResult({ error: err.message || 'request failed' }, 'network', false);
+        setTestStatus(err.message || 'Dry-run test failed', 'error');
+    } finally {
+        tokenInput.value = '';
+        button.disabled = false;
+    }
+}
+
 function renderHistory(history) {
     const items = Array.isArray(history) ? history : [];
     if (!items.length) {
@@ -664,8 +918,8 @@ async function loadAutomationStatus() {
         ['file_stability_check_enabled', esc(boolText(data.file_stability_check_enabled))],
         ['file_stability_wait_seconds', esc(data.file_stability_wait_seconds)],
         ['review_output_enabled', esc(boolText(data.review_output_enabled))],
-        ['review_output_root', esc(data.review_output_root)],
-        ['review_output_mappings', esc((data.review_output_mappings || []).map(mapping => `${mapping.input_root} -> ${mapping.review_root}`).join(' / '))],
+        ['active review_output_mappings', esc((data.review_output_mappings || []).map(mapping => `${mapping.input_root} -> ${mapping.review_root}`).join(' / '))],
+        ['legacy review_output_root', `${esc(data.review_output_root)}<span class="legacy-note">Compatibility/display only when per-root mappings are configured.</span>`],
         ['review_preflight_enabled', esc(boolText(data.review_preflight_enabled))],
         ['schedule', esc([boolText(data.schedule?.enabled), data.schedule_window].filter(v => !isBlank(v)).join(' / '))],
         ['default_profile', esc(data.default_profile)],
@@ -743,6 +997,7 @@ async function loadAutomationStatus() {
     ]);
 
     renderHistory(data.automation_history || []);
+    renderReadiness(data);
     updateScheduleForm(data);
 
     const sources = data.sources || {};
@@ -773,6 +1028,7 @@ loadAutomationStatus().catch(err => {
         `<dt>error</dt><dd>${esc(err.message)}</dd>`;
 });
 document.getElementById('automation-settings-form').addEventListener('submit', saveAutomationSettings);
+document.getElementById('automation-test-form').addEventListener('submit', runAutomationDryRunTest);
 document.getElementById('add-review-mapping').addEventListener('click', () => {
     document.getElementById('review-mapping-list').insertAdjacentHTML('beforeend', mappingRowHtml('', ''));
 });
