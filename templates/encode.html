@@ -524,6 +524,18 @@ function buildCard(job) {
         </div>`;
     }
 
+    let radarrRefreshHtml = '';
+    const radarrRefresh = job.config?.radarr_refresh_after_move;
+    if (radarrRefresh && Object.prototype.hasOwnProperty.call(radarrRefresh, 'radarr_refresh_after_move_enabled')) {
+        const enabled = !!radarrRefresh.radarr_refresh_after_move_enabled;
+        const attempted = !!radarrRefresh.radarr_refresh_attempted;
+        const ok = !!radarrRefresh.radarr_refresh_ok;
+        const status = !enabled ? 'disabled' : (attempted ? (ok ? 'accepted' : 'failed') : 'not attempted');
+        const movieId = radarrRefresh.radarr_movie_id ? ` · movie ${radarrRefresh.radarr_movie_id}` : '';
+        const reason = radarrRefresh.radarr_refresh_reason ? ` · ${radarrRefresh.radarr_refresh_reason}` : '';
+        radarrRefreshHtml = `<div class="job-meta"><span>Radarr refresh after Move: ${escHtml(status + movieId + reason)}</span></div>`;
+    }
+
     // Progress bar
     const pct = Math.min(100, job.progress || 0);
     const barCls = job.status === 'done' ? 'done' : job.status === 'failed' ? 'failed' : '';
@@ -570,6 +582,7 @@ function buildCard(job) {
             ${metaParts.map(p => `<span>${p}</span>`).join('')}
         </div>
         ${mediaInfoHtml}
+        ${radarrRefreshHtml}
         <div class="job-bar-row">
             <div class="job-bar">
                 <div class="job-bar-fill ${barCls}" style="width:${pct}%"></div>

@@ -173,6 +173,8 @@
             padding: 7px 10px;
             cursor: pointer;
             justify-self: start;
+            text-decoration: none;
+            display: inline-block;
         }
         .settings-check { display: flex; align-items: center; gap: 8px; min-height: 36px; }
         .settings-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -331,6 +333,22 @@
                     </label>
                     <p class="settings-help">This does not replace originals. Live review encoding can only queue into mapped MediaStatReview folders when dry_run is false, this gate is enabled, the schedule window is open, mapping is found, and preflight passes. It does not delete originals, refresh Plex/Radarr, or override dry_run. Leaving it off is the safe normal state.</p>
                 </div>
+                <div class="settings-field settings-full">
+                    <label for="radarr-refresh-after-move-enabled">Radarr refresh after Move</label>
+                    <label class="settings-check">
+                        <input type="checkbox" id="radarr-refresh-after-move-enabled">
+                        <span>enabled</span>
+                    </label>
+                    <p class="settings-help">Default off. When enabled, MediaStat will ask Radarr to refresh the movie after a successful Move replaces the original file. It does not rename, search, download, upgrade, delete, or refresh Plex.</p>
+                </div>
+                <div class="settings-field settings-wide">
+                    <label for="radarr-url">Radarr URL</label>
+                    <input type="text" id="radarr-url" placeholder="http://radarr:7878">
+                </div>
+                <div class="settings-field settings-wide">
+                    <label for="radarr-api-key">Radarr API key</label>
+                    <input type="password" id="radarr-api-key" autocomplete="new-password" placeholder="Leave blank to keep current key">
+                </div>
                 <div class="settings-field">
                     <label for="automation-token">Automation token</label>
                     <input type="password" id="automation-token" autocomplete="current-password" placeholder="Required to save">
@@ -379,7 +397,7 @@
                 </div>
                 <div class="settings-field">
                     <label for="test-profile">Profile</label>
-                    <input type="text" id="test-profile" value="high_quality_hevc_qp18">
+                    <input type="text" id="test-profile" value="high_quality_hevc_qp16">
                 </div>
                 <div class="settings-field settings-wide">
                     <label for="test-token">Automation token</label>
@@ -410,9 +428,14 @@
                         <option value="sonarr">sonarr</option>
                     </select>
                 </div>
-                <div class="settings-field">
+                <div class="settings-field settings-wide">
                     <label for="manual-live-review-profile">Profile</label>
-                    <input type="text" id="manual-live-review-profile" value="high_quality_hevc_qp18">
+                    <select id="manual-live-review-profile">
+                        <option value="high_quality_hevc_qp16" selected>high_quality_hevc_qp16</option>
+                        <option value="high_quality_hevc_qp18">high_quality_hevc_qp18</option>
+                        <option value="balanced_hevc_qp20">balanced_hevc_qp20</option>
+                    </select>
+                    <p class="settings-help">Lower QP means higher quality and usually a larger file. QP16 is higher quality than QP18; QP20 is smaller/more balanced.</p>
                 </div>
                 <div class="settings-field settings-wide">
                     <label for="manual-live-review-token">Automation token</label>
@@ -766,6 +789,13 @@ function updateScheduleForm(data) {
     document.getElementById('review-output-enabled').checked = boolValue(data.review_output_enabled);
     document.getElementById('review-preflight-enabled').checked = boolValue(data.review_preflight_enabled);
     document.getElementById('live-review-enabled').checked = boolValue(data.live_review_enabled);
+    document.getElementById('radarr-refresh-after-move-enabled').checked = boolValue(data.radarr_refresh_after_move_enabled);
+    document.getElementById('radarr-url').value = data.radarr_url || '';
+    const radarrApiKey = document.getElementById('radarr-api-key');
+    radarrApiKey.value = '';
+    radarrApiKey.placeholder = boolValue(data.radarr_api_key_configured)
+        ? 'Configured; leave blank to keep current key'
+        : 'Optional Radarr API key';
     renderReviewMappings(data);
 }
 
@@ -783,8 +813,12 @@ async function saveAutomationSettings(event) {
         review_output_enabled: document.getElementById('review-output-enabled').checked,
         review_preflight_enabled: document.getElementById('review-preflight-enabled').checked,
         review_output_mappings: collectReviewMappings(),
-        live_review_enabled: document.getElementById('live-review-enabled').checked
+        live_review_enabled: document.getElementById('live-review-enabled').checked,
+        radarr_refresh_after_move_enabled: document.getElementById('radarr-refresh-after-move-enabled').checked,
+        radarr_url: document.getElementById('radarr-url').value.trim()
     };
+    const radarrApiKey = document.getElementById('radarr-api-key').value.trim();
+    if (radarrApiKey) payload.radarr_api_key = radarrApiKey;
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['X-Automation-Token'] = token;
     button.disabled = true;
@@ -802,12 +836,14 @@ async function saveAutomationSettings(event) {
             throw new Error(message);
         }
         tokenInput.value = '';
+        document.getElementById('radarr-api-key').value = '';
         setSettingsStatus('Automation settings saved', 'ok');
         await loadAutomationStatus();
     } catch (err) {
         setSettingsStatus(err.message || 'Could not save automation settings', 'error');
     } finally {
         tokenInput.value = '';
+        document.getElementById('radarr-api-key').value = '';
         button.disabled = false;
     }
 }
@@ -897,7 +933,7 @@ async function runAutomationDryRunTest(event) {
         source: document.getElementById('test-source').value,
         event: document.getElementById('test-event').value,
         path: document.getElementById('test-path').value.trim(),
-        profile: document.getElementById('test-profile').value.trim() || 'high_quality_hevc_qp18',
+        profile: document.getElementById('test-profile').value.trim() || 'high_quality_hevc_qp16',
         post_action: 'keep'
     };
     const headers = { 'Content-Type': 'application/json' };
@@ -947,11 +983,15 @@ function renderManualLiveReviewResult(payload, httpStatus, ok) {
         ? 'Live review encode queued into the mapped MediaStatReview folder.'
         : (ok ? 'Live review response returned. Review safety fields below.' : 'Live review request was rejected or failed.');
     const rows = testSummaryRows(payload, httpStatus);
+    const jobsLink = success
+        ? `<div class="settings-actions" style="margin-top:12px"><a class="settings-secondary" href="${BASE_PATH}/encode">View Encode Jobs</a></div>`
+        : '';
     document.getElementById('manual-live-review-result').innerHTML = `
         <div class="result-banner ${status}">${esc(title)}</div>
         <dl class="automation-kv">${rows.map(([label, value]) =>
             `<dt>${esc(label)}</dt><dd>${displayValue(value)}</dd>`
         ).join('')}</dl>
+        ${jobsLink}
     `;
 }
 
@@ -963,7 +1003,7 @@ async function runManualLiveReviewTest(event) {
     const body = {
         source: document.getElementById('manual-live-review-source').value,
         path: document.getElementById('manual-live-review-path').value.trim(),
-        profile: document.getElementById('manual-live-review-profile').value.trim() || 'high_quality_hevc_qp18'
+        profile: document.getElementById('manual-live-review-profile').value || 'high_quality_hevc_qp16'
     };
     const headers = { 'Content-Type': 'application/json' };
     if (token) headers['X-Automation-Token'] = token;
@@ -1071,6 +1111,9 @@ async function loadAutomationStatus() {
         ['schedule', esc([boolText(data.schedule?.enabled), data.schedule_window].filter(v => !isBlank(v)).join(' / '))],
         ['default_profile', esc(data.default_profile)],
         ['default_post_action', esc(data.default_post_action)],
+        ['radarr_refresh_after_move', esc(boolText(data.radarr_refresh_after_move_enabled))],
+        ['radarr_url', esc(data.radarr_url)],
+        ['radarr_api_key_configured', esc(boolText(data.radarr_api_key_configured))],
         ['token_configured', esc(boolText(data.token_configured))],
         ['enabled_sources', listValue(data.enabled_sources)]
     ]);

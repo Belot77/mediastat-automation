@@ -15,8 +15,9 @@ import datetime
 from collections import deque
 import xml.etree.ElementTree as ET
 from pathlib import Path
+import urllib.error
 import urllib.request
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlsplit
 from typing import Optional
 
 import yaml
@@ -73,7 +74,10 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
     "review_output_root": "/media/mediastat-review",
     "review_output_mappings": [],
     "review_preflight_enabled": True,
-    "default_profile": "high_quality_hevc_qp18",
+    "radarr_refresh_after_move_enabled": False,
+    "radarr_url": "",
+    "radarr_api_key": "",
+    "default_profile": "high_quality_hevc_qp16",
     "default_post_action": "keep",
     "schedule": {
         "enabled": True,
@@ -98,6 +102,15 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
             "gpu": "auto",
             "format": "mkv",
             "qp": 18,
+            "preset": "quality",
+            "lang": "eng",
+        },
+        "high_quality_hevc_qp16": {
+            "label": "High Quality HEVC QP16",
+            "codec": "hevc",
+            "gpu": "auto",
+            "format": "mkv",
+            "qp": 16,
             "preset": "quality",
             "lang": "eng",
         },
@@ -142,7 +155,7 @@ DEFAULT_AUTOMATION_CONFIG: dict = {
         "radarr": {
             "enabled": True,
             "allowed_events": ["import"],
-            "default_profile": "high_quality_hevc_qp18",
+            "default_profile": "high_quality_hevc_qp16",
             "default_post_action": "keep",
             "allow_replace": False,
         },
@@ -235,6 +248,27 @@ def _automation_normalize_mapping_review_root(value: object) -> str:
     return _automation_normalize_media_path(value, "review_root")
 
 
+def _automation_normalize_radarr_url(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if any(ch in text for ch in ("\x00", "\r", "\n", "\t")):
+        raise ValueError("radarr_url contains unsafe characters")
+    parsed = urlsplit(text)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("radarr_url must start with http:// or https://")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("radarr_url must not include credentials, query, or fragment")
+    return text.rstrip("/")
+
+
+def _automation_normalize_radarr_api_key(value: object) -> str:
+    text = str(value or "").strip()
+    if any(ch in text for ch in ("\x00", "\r", "\n", "\t")):
+        raise ValueError("radarr_api_key contains unsafe characters")
+    return text
+
+
 def _automation_mapping_entries(value: object, *, strict: bool = False) -> list[dict]:
     if value in (None, ""):
         return []
@@ -299,9 +333,29 @@ def _automation_settings_override_from_mapping(data: object, *, strict: bool = F
     elif "schedule" in data and strict:
         raise ValueError("schedule settings must be an object")
 
-    for key in ("review_output_enabled", "review_preflight_enabled", "live_review_enabled"):
+    for key in (
+        "review_output_enabled",
+        "review_preflight_enabled",
+        "live_review_enabled",
+        "radarr_refresh_after_move_enabled",
+    ):
         if key in data:
             clean[key] = bool(data.get(key))
+    if "radarr_url" in data:
+        try:
+            clean["radarr_url"] = _automation_normalize_radarr_url(data.get("radarr_url"))
+        except ValueError:
+            if strict:
+                raise
+    if "radarr_api_key" in data:
+        try:
+            api_key = _automation_normalize_radarr_api_key(data.get("radarr_api_key"))
+        except ValueError:
+            if strict:
+                raise
+            api_key = ""
+        if api_key or strict:
+            clean["radarr_api_key"] = api_key
     if "review_output_mappings" in data:
         clean["review_output_mappings"] = _automation_mapping_entries(
             data.get("review_output_mappings"),
@@ -4411,6 +4465,149 @@ def _queue_file_encode(file_path: Path, config: dict, output_path: Path | None =
     return job_id
 
 
+def _radarr_move_result(
+    *,
+    enabled: bool,
+    attempted: bool = False,
+    ok: bool = False,
+    reason: str = "",
+    movie_id: int | None = None,
+) -> dict:
+    return {
+        "radarr_refresh_after_move_enabled": enabled,
+        "radarr_refresh_attempted": attempted,
+        "radarr_refresh_ok": ok,
+        "radarr_refresh_reason": reason,
+        "radarr_movie_id": movie_id,
+    }
+
+
+def _radarr_path_text(value: object) -> str:
+    text = str(value or "").replace("\\", "/").strip().rstrip("/")
+    if not text:
+        return ""
+    prefix = "/" if text.startswith("/") else ""
+    return prefix + "/".join(part for part in text.split("/") if part)
+
+
+def _radarr_movie_id_from_config(config: dict) -> int | None:
+    for key in ("automation_radarr_movie_id", "radarr_movie_id", "movie_id"):
+        raw = config.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            movie_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if movie_id > 0:
+            return movie_id
+    return None
+
+
+def _radarr_api_json(base_url: str, api_key: str, method: str, path: str, payload: dict | None = None) -> object:
+    data = None
+    headers = {"X-Api-Key": api_key, "Accept": "application/json"}
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(f"{base_url}{path}", data=data, headers=headers, method=method)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        raw = resp.read()
+    if not raw:
+        return {}
+    return json.loads(raw.decode("utf-8"))
+
+
+def _radarr_resolve_movie_id(base_url: str, api_key: str, moved_path: Path) -> tuple[int | None, str]:
+    moved_text = _radarr_path_text(moved_path)
+    moved_parent = _radarr_path_text(moved_path.parent)
+    try:
+        movies = _radarr_api_json(base_url, api_key, "GET", "/api/v3/movie")
+    except urllib.error.HTTPError as exc:
+        return None, f"Radarr movie lookup failed with HTTP {exc.code}"
+    except urllib.error.URLError:
+        return None, "Radarr movie lookup failed: connection error"
+    except TimeoutError:
+        return None, "Radarr movie lookup failed: timeout"
+    except Exception:
+        return None, "Radarr movie lookup failed"
+    if not isinstance(movies, list):
+        return None, "Radarr movie lookup returned an unexpected response"
+
+    exact_matches: list[dict] = []
+    folder_matches: list[dict] = []
+    containing_matches: list[dict] = []
+    for movie in movies:
+        if not isinstance(movie, dict) or not movie.get("id"):
+            continue
+        movie_path = _radarr_path_text(movie.get("path"))
+        movie_file = movie.get("movieFile") if isinstance(movie.get("movieFile"), dict) else {}
+        relative_path = _radarr_path_text(movie_file.get("relativePath") if movie_file else "")
+        if movie_path and relative_path and _radarr_path_text(f"{movie_path}/{relative_path}") == moved_text:
+            exact_matches.append(movie)
+        elif movie_path and movie_path == moved_parent:
+            folder_matches.append(movie)
+        elif movie_path and moved_text.startswith(movie_path + "/"):
+            containing_matches.append(movie)
+
+    for matches, label in (
+        (exact_matches, "file"),
+        (folder_matches, "folder"),
+        (containing_matches, "containing folder"),
+    ):
+        ids = {int(movie["id"]) for movie in matches if movie.get("id")}
+        if len(ids) == 1:
+            return ids.pop(), f"resolved Radarr movie by {label} path"
+        if len(ids) > 1:
+            return None, f"multiple Radarr movies matched {label} path"
+    return None, "no unique Radarr movie matched moved path"
+
+
+def _radarr_refresh_after_move(job: EncodeJob, moved_path: Path) -> dict:
+    enabled = bool(AUTOMATION_CONFIG.get("radarr_refresh_after_move_enabled", False))
+    if not enabled:
+        return _radarr_move_result(enabled=False, reason="Radarr refresh after Move is disabled")
+    base_url = str(AUTOMATION_CONFIG.get("radarr_url") or "").strip().rstrip("/")
+    api_key = str(AUTOMATION_CONFIG.get("radarr_api_key") or "").strip()
+    if not base_url or not api_key:
+        return _radarr_move_result(enabled=True, reason="Radarr URL/API key is not configured")
+
+    config = job.config if isinstance(job.config, dict) else {}
+    source = str(config.get("automation_source") or "").strip().lower()
+    movie_id = _radarr_movie_id_from_config(config) if source == "radarr" else None
+    if movie_id is None:
+        movie_id, reason = _radarr_resolve_movie_id(base_url, api_key, moved_path)
+        if movie_id is None:
+            return _radarr_move_result(enabled=True, reason=reason)
+
+    try:
+        _radarr_api_json(base_url, api_key, "POST", "/api/v3/command", {"name": "RefreshMovie", "movieId": movie_id})
+    except urllib.error.HTTPError as exc:
+        return _radarr_move_result(
+            enabled=True, attempted=True, ok=False,
+            reason=f"Radarr refresh request failed with HTTP {exc.code}", movie_id=movie_id,
+        )
+    except urllib.error.URLError:
+        return _radarr_move_result(
+            enabled=True, attempted=True, ok=False,
+            reason="Radarr refresh request failed: connection error", movie_id=movie_id,
+        )
+    except TimeoutError:
+        return _radarr_move_result(
+            enabled=True, attempted=True, ok=False,
+            reason="Radarr refresh request failed: timeout", movie_id=movie_id,
+        )
+    except Exception:
+        return _radarr_move_result(
+            enabled=True, attempted=True, ok=False,
+            reason="Radarr refresh request failed", movie_id=movie_id,
+        )
+    return _radarr_move_result(
+        enabled=True, attempted=True, ok=True,
+        reason="Radarr RefreshMovie command accepted", movie_id=movie_id,
+    )
+
+
 _AUTOMATION_LAST: dict = {"request": None, "result": None, "timestamp": None}
 
 
@@ -4796,6 +4993,9 @@ def _automation_status_payload() -> dict:
         "review_output_root": str(AUTOMATION_CONFIG.get("review_output_root") or ""),
         "review_output_mappings": _automation_review_mappings(),
         "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
+        "radarr_refresh_after_move_enabled": bool(AUTOMATION_CONFIG.get("radarr_refresh_after_move_enabled", False)),
+        "radarr_url": str(AUTOMATION_CONFIG.get("radarr_url") or ""),
+        "radarr_api_key_configured": bool(AUTOMATION_CONFIG.get("radarr_api_key")),
         "allowed_roots": [str(root) for root in ALLOWED_ROOTS],
         "schedule": public_schedule,
         "schedule_window": public_schedule["window"],
@@ -5074,6 +5274,27 @@ def _automation_settings_auth(request: Request) -> None:
         raise HTTPException(status_code=403, detail={"error": "automation token is invalid"})
 
 
+def _automation_extract_radarr_movie_id(body: dict) -> int | None:
+    candidates = [
+        body.get("radarr_movie_id"),
+        body.get("movie_id"),
+        body.get("movieId"),
+    ]
+    movie = body.get("movie")
+    if isinstance(movie, dict):
+        candidates.extend([movie.get("id"), movie.get("movieId")])
+    for candidate in candidates:
+        if candidate in (None, ""):
+            continue
+        try:
+            movie_id = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if movie_id > 0:
+            return movie_id
+    return None
+
+
 def _validate_automation_schedule_settings(value: object) -> dict:
     if not isinstance(value, dict):
         raise HTTPException(status_code=400, detail={"error": "schedule settings must be an object"})
@@ -5101,6 +5322,23 @@ def _validate_automation_review_settings(value: dict) -> dict:
     }
 
 
+def _validate_automation_radarr_settings(value: dict) -> dict:
+    try:
+        radarr_url = _automation_normalize_radarr_url(
+            value.get("radarr_url", AUTOMATION_CONFIG.get("radarr_url") or "")
+        )
+        supplied_key = _automation_normalize_radarr_api_key(value.get("radarr_api_key"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"error": str(exc)})
+    if not supplied_key:
+        supplied_key = str(AUTOMATION_CONFIG.get("radarr_api_key") or "")
+    return {
+        "radarr_refresh_after_move_enabled": bool(value.get("radarr_refresh_after_move_enabled", False)),
+        "radarr_url": radarr_url,
+        "radarr_api_key": supplied_key,
+    }
+
+
 @app.get("/automation/status")
 async def automation_status():
     return _automation_status_payload()
@@ -5118,7 +5356,8 @@ async def automation_settings(request: Request):
 
     schedule_settings = _validate_automation_schedule_settings(body.get("schedule"))
     review_settings = _validate_automation_review_settings(body)
-    settings_payload = {"schedule": schedule_settings, **review_settings}
+    radarr_settings = _validate_automation_radarr_settings(body)
+    settings_payload = {"schedule": schedule_settings, **review_settings, **radarr_settings}
     try:
         _save_automation_settings_overrides(settings_payload)
     except ValueError as exc:
@@ -5131,7 +5370,7 @@ async def automation_settings(request: Request):
     if not isinstance(current_schedule, dict):
         current_schedule = {}
     AUTOMATION_CONFIG["schedule"] = _deep_merge_config(current_schedule, schedule_settings)
-    for key, value in review_settings.items():
+    for key, value in {**review_settings, **radarr_settings}.items():
         AUTOMATION_CONFIG[key] = value
     schedule = AUTOMATION_CONFIG["schedule"]
     return {
@@ -5149,6 +5388,9 @@ async def automation_settings(request: Request):
         "review_output_mappings": _automation_review_mappings(),
         "review_preflight_enabled": bool(AUTOMATION_CONFIG.get("review_preflight_enabled", True)),
         "live_review_enabled": _automation_live_review_enabled(),
+        "radarr_refresh_after_move_enabled": bool(AUTOMATION_CONFIG.get("radarr_refresh_after_move_enabled", False)),
+        "radarr_url": str(AUTOMATION_CONFIG.get("radarr_url") or ""),
+        "radarr_api_key_configured": bool(AUTOMATION_CONFIG.get("radarr_api_key")),
     }
 
 
@@ -5274,6 +5516,9 @@ async def automation_queue(request: Request):
         "automation_category": category,
         "automation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     })
+    radarr_movie_id = _automation_extract_radarr_movie_id(body) if source == "radarr" else None
+    if radarr_movie_id is not None:
+        config["automation_radarr_movie_id"] = radarr_movie_id
     output_plan = _automation_output_plan(file_path, config)
     output_path = output_plan.get("output_path")
     output_plan_context = {k: v for k, v in output_plan.items() if k != "output_path"}
@@ -5784,8 +6029,7 @@ async def automation_live_review_test(request: Request):
     input_path = str(body.get("path") or "").strip()
     profile_name = str(
         body.get("profile")
-        or AUTOMATION_CONFIG.get("default_profile")
-        or "high_quality_hevc_qp18"
+        or "high_quality_hevc_qp16"
     ).strip()
     post_action = "keep"
     _remember_automation_request(
@@ -5888,6 +6132,9 @@ async def automation_live_review_test(request: Request):
         "automation_manual_live_review_test": True,
         "automation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     })
+    radarr_movie_id = _automation_extract_radarr_movie_id(body) if source == "radarr" else None
+    if radarr_movie_id is not None:
+        config["automation_radarr_movie_id"] = radarr_movie_id
 
     output_plan = _automation_output_plan(file_path, config)
     output_path = output_plan.get("output_path")
@@ -6227,6 +6474,20 @@ async def move_encode(job_id: str, request: Request):
     parent = str(dst.parent)
     _dir_size_cache.pop(parent, None)
     _dir_listing_cache.pop(parent, None)
+    radarr_result = await asyncio.to_thread(_radarr_refresh_after_move, job, dst)
+    if not isinstance(job.config, dict):
+        job.config = {}
+    job.config["radarr_refresh_after_move"] = radarr_result
+    job.config.update(radarr_result)
+    if radarr_result.get("radarr_refresh_attempted"):
+        log.info(
+            "Radarr refresh after Move %s for job %s movie_id=%s",
+            "succeeded" if radarr_result.get("radarr_refresh_ok") else "failed",
+            job_id,
+            radarr_result.get("radarr_movie_id"),
+        )
+    elif radarr_result.get("radarr_refresh_after_move_enabled"):
+        log.info("Radarr refresh after Move skipped for job %s: %s", job_id, radarr_result.get("radarr_refresh_reason"))
     _notify_encode(job_id)
     await _save_encode_job(job)
     return Response(status_code=204)

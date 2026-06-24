@@ -3,8 +3,10 @@
 V1 exposes a backend-only automation endpoint that validates requests from Radarr,
 Sonarr, SABnzbd, or qBittorrent and queues normal MediaStat encode jobs.
 
-V1 is dry-run first and keep-only. It does not delete, replace, rename, overwrite,
-move, stage, backup, quarantine, or refresh media/library records.
+V1 automation is dry-run first and keep-only. It does not delete, replace,
+rename, overwrite, move, stage, backup, quarantine, or refresh media/library
+records. A separate default-off Radarr refresh after a successful manual Move is
+available for controlled testing.
 
 ## Example config.yaml
 
@@ -23,7 +25,10 @@ automation:
     - input_root: "/media/movies"
       review_root: "/media/MediaStatReview/movies"
   review_preflight_enabled: true
-  default_profile: high_quality_hevc_qp18
+  radarr_refresh_after_move_enabled: false
+  radarr_url: ""
+  radarr_api_key: ""
+  default_profile: high_quality_hevc_qp16
   default_post_action: keep
 
   schedule:
@@ -34,6 +39,14 @@ automation:
     do_not_start_if_less_than_minutes_left: 90
 
   profiles:
+    high_quality_hevc_qp16:
+      label: "High Quality HEVC QP16"
+      codec: hevc
+      gpu: auto
+      format: mkv
+      qp: 16
+      preset: quality
+      lang: eng
     high_quality_hevc_qp18:
       label: "High Quality HEVC QP18"
       codec: hevc
@@ -64,7 +77,7 @@ automation:
       enabled: true
       allowed_events:
         - import
-      default_profile: high_quality_hevc_qp18
+      default_profile: high_quality_hevc_qp16
       default_post_action: keep
       allow_replace: false
     sonarr:
@@ -119,7 +132,7 @@ curl -X POST "http://localhost:8080/automation/queue" \
     "source": "radarr",
     "event": "import",
     "path": "/media/library/Example.mkv",
-    "profile": "high_quality_hevc_qp18",
+    "profile": "high_quality_hevc_qp16",
     "post_action": "keep",
     "category": ""
   }'
@@ -143,7 +156,7 @@ curl -X POST "http://HOME_ASSISTANT_HOST:8080/automation/queue" \
     "source": "radarr",
     "event": "import",
     "path": "/media/library/Example.mkv",
-    "profile": "high_quality_hevc_qp18",
+    "profile": "high_quality_hevc_qp16",
     "post_action": "keep",
     "category": ""
   }'
@@ -360,6 +373,13 @@ passes. The queued output is the mapped MediaStatReview output path only.
 Original media files are not replaced, deleted, moved, renamed, or refreshed in
 Radarr, Sonarr, Plex, or other library tools.
 
+The Manual Live Review panel uses a known-safe profile selector. QP16 is
+available as `high_quality_hevc_qp16` and is the default for manual live-review
+tests. Lower QP means higher quality and usually a larger file: QP16 is higher
+quality than QP18, while QP20 is smaller and more balanced. After a successful
+manual live-review queue response, the page shows a **View Encode Jobs** link to
+the existing `/encode` page instead of duplicating progress UI on `/automation`.
+
 Expected response fields include `queued`, `dry_run`, `job_id`, `input_path`,
 `output_path`, `review_mapping_found`, `review_mapping_input_root`,
 `review_mapping_review_root`, `review_preflight_ok`,
@@ -384,6 +404,39 @@ Ignored or rejected requests remain non-queueing decisions. The preview does not
 start jobs, encode files, change original media, or change scheduler behaviour.
 Unmapped input roots use `would_queue: false`, `queue_blocked_by:
 "review_mapping_missing"`, and `preview_status: "blocked_review_mapping"`.
+
+## Radarr refresh after Move
+
+Radarr refresh after Move is supported for controlled testing, but it is default
+off:
+
+```yaml
+automation:
+  radarr_refresh_after_move_enabled: false
+  radarr_url: ""
+  radarr_api_key: ""
+```
+
+When enabled, MediaStat attempts a Radarr `RefreshMovie` command only after the
+existing Encode Jobs **Move** action has successfully replaced the original file
+with the encoded output. It does not run after encode completion, manual
+live-review queueing, preview, or failed Move.
+
+This feature does not ask Radarr to rename, search, download, upgrade, delete, or
+refresh Plex. If a Radarr movie ID is not already attached to the job, MediaStat
+tries to resolve a unique movie by matching the moved file or movie folder
+against Radarr's movie list. If no unique movie can be resolved, it safely does
+nothing and records the reason on the Encode Jobs card.
+
+The Radarr API key is treated as a secret. It is not displayed in the UI, not
+stored in automation history, and not logged.
+
+## Audio and subtitle inspection
+
+Audio and subtitle selection policy is unchanged in this patch. Use the existing
+Encode Jobs media info row, file info/MediaInfo tooling, and preview/details
+views to inspect actual output tracks before changing audio, `und` language, or
+subtitle handling later.
 
 For direct HTTP checks, request:
 
@@ -424,7 +477,7 @@ read under its allowed roots.
   "source": "radarr",
   "event": "import",
   "path": "/media/library/Movie Example (2026)/Movie Example (2026).mkv",
-  "profile": "high_quality_hevc_qp18",
+  "profile": "high_quality_hevc_qp16",
   "post_action": "keep",
   "category": ""
 }
@@ -476,5 +529,6 @@ library manager can handle final imports.
 ## V1 limits
 
 V1 only supports `post_action: keep`. Destructive replace/delete workflows,
-staging output, backup/quarantine, Radarr/Sonarr refresh, dashboard UI, profile
-editor UI, token generator UI, and path mapping UI are reserved for later work.
+staging output, backup/quarantine, automatic Radarr/Sonarr automation refresh,
+dashboard UI, profile editor UI, token generator UI, and path mapping UI are
+reserved for later work.
