@@ -26,7 +26,7 @@ options:
     token: ""
     dry_run: true
     allow_arr_sidecar_output: false
-    default_profile: high_quality_hevc_qp18
+    default_profile: high_quality_hevc_qp16
     default_post_action: keep
 
 schema:
