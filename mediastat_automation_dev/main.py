@@ -444,12 +444,25 @@ templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 templates.env.filters["pathquote"] = lambda p: quote(str(p), safe="")
 
 
+def _ingress_prefix(request: Request) -> str:
+    prefix = (
+        request.headers.get("X-Ingress-Path")
+        or request.headers.get("X-Forwarded-Prefix")
+        or request.scope.get("root_path")
+        or ""
+    )
+    prefix = str(prefix).strip()
+    if not prefix or prefix == "/":
+        return ""
+    return prefix.rstrip("/")
+
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     qs = f"?{request.url.query}" if request.url.query else ""
     log.info("%s %s%s", request.method, request.url.path, qs)
     # Capture HA ingress base path so templates and redirects can use it
-    request.state.ingress_path = request.headers.get("X-Ingress-Path", "").rstrip("/")
+    request.state.ingress_path = _ingress_prefix(request)
     return await call_next(request)
 
 
