@@ -514,7 +514,7 @@ function buildCard(job) {
         const tgtRes  = cfgW ? `${cfgW}px` : srcRes;
         const tgtVid  = ['H.265', tgtRes].filter(Boolean).join(' ');
         const audio   = [mi.audio_codec?.toUpperCase(), mi.audio_count > 1 ? `×${mi.audio_count}` : ''].filter(Boolean).join(' ');
-        const subs    = mi.sub_count ? `${mi.sub_count} sub${mi.sub_count !== 1 ? 's' : ''}` : '';
+        const subs    = mi.kept_subtitle_summary || (mi.sub_count ? `${mi.sub_count} sub${mi.sub_count !== 1 ? 's' : ''}` : '');
         const right   = [audio, subs].filter(Boolean).join(' · ');
         mediaInfoHtml = `<div class="job-mediainfo">
             <span class="mi-src">${escHtml(srcVid)}</span>

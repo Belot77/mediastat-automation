@@ -3196,6 +3196,92 @@ def _choose_encoder_name(hw: dict, gpu_pref: str, codec: str = "hevc") -> str:
     return sw
 
 
+def _stream_tag(stream: dict, *keys: str) -> str:
+    tags = stream.get("tags") or {}
+    for key in keys:
+        value = tags.get(key) or tags.get(key.upper())
+        if value:
+            return str(value)
+    return ""
+
+
+def _subtitle_lang(stream: dict) -> str:
+    lang = _stream_tag(stream, "language").strip().lower()
+    if lang in ("eng", "en", "english") or lang.startswith("en-"):
+        return "eng"
+    return lang
+
+
+def _subtitle_title(stream: dict) -> str:
+    parts = [
+        _stream_tag(stream, "title"),
+        _stream_tag(stream, "handler_name"),
+        _stream_tag(stream, "handler"),
+        str(stream.get("codec_name") or ""),
+    ]
+    return " ".join(part for part in parts if part).lower()
+
+
+def _select_subtitle_streams(s_streams: Optional[list]) -> dict:
+    streams = s_streams or []
+    forced: list[int] = []
+    normal: list[tuple[bool, int]] = []
+    sdh: list[tuple[bool, int]] = []
+    commentary_terms = ("commentary", "commentator", "director")
+    sdh_terms = ("sdh", "hearing impaired", "hard of hearing", "hoh", "closed captions", "closed caption", "captions", " cc")
+
+    for idx, stream in enumerate(streams):
+        if _subtitle_lang(stream) != "eng":
+            continue
+        title = _subtitle_title(stream)
+        if any(term in title for term in commentary_terms):
+            continue
+        disposition = stream.get("disposition") or {}
+        is_forced = disposition.get("forced") == 1 or "forced" in title
+        is_default = disposition.get("default") == 1
+        is_sdh = any(term in title for term in sdh_terms)
+        if is_forced:
+            forced.append(idx)
+        elif is_sdh:
+            sdh.append((is_default, idx))
+        else:
+            normal.append((is_default, idx))
+
+    selected = list(dict.fromkeys(forced))
+    normal.sort(key=lambda item: (not item[0], item[1]))
+    sdh.sort(key=lambda item: (not item[0], item[1]))
+    normal_count = 0
+    sdh_count = 0
+    if normal:
+        selected.append(normal[0][1])
+        normal_count = 1
+    elif not selected and sdh:
+        selected.append(sdh[0][1])
+        sdh_count = 1
+
+    selected = list(dict.fromkeys(selected))
+    input_count = len(streams)
+    kept_count = len(selected)
+    dropped_count = max(0, input_count - kept_count)
+    summary_parts = []
+    if forced:
+        summary_parts.append(f"{len(forced)} forced English")
+    if normal_count:
+        summary_parts.append("1 English")
+    if sdh_count:
+        summary_parts.append("1 English SDH")
+    if not summary_parts:
+        summary_parts.append("no English subtitles kept")
+    summary = f"{kept_count}/{input_count} kept ({', '.join(summary_parts)}; {dropped_count} dropped)"
+    return {
+        "indexes": selected,
+        "input_subtitle_count": input_count,
+        "kept_subtitle_count": kept_count,
+        "dropped_subtitle_count": dropped_count,
+        "kept_subtitle_summary": summary,
+    }
+
+
 _HQDN3D_PRESETS = {
     "ultralight": "1:1:3:3",
     "light":      "2:2:5:5",
@@ -3212,7 +3298,7 @@ def _build_ffmpeg_cmd(
     color_primaries: str = "", transfer_characteristics: str = "",
     color_space: str = "", color_range: str = "",
     crop_filter: Optional[str] = None, a_streams: Optional[list] = None,
-    source_fps: Optional[float] = None,
+    s_streams: Optional[list] = None, source_fps: Optional[float] = None,
 ) -> tuple[list[str], str]:
     gpu_pref = config.get("gpu", "auto")
     codec    = config.get("codec", "hevc")
@@ -3348,12 +3434,16 @@ def _build_ffmpeg_cmd(
         # Also set container-level color metadata for all paths
         cmd += color_meta
 
-    # Copy all audio/subtitle streams; -ignore_unknown drops streams the
+    # Copy audio and selected subtitles; -ignore_unknown drops streams the
     # container doesn't support (e.g. PGS subs in MP4) rather than failing.
     cmd += ["-c:a", "copy", "-c:s", "copy"]
+    subtitle_selection = _select_subtitle_streams(s_streams)
+    subtitle_maps = []
+    for idx in subtitle_selection["indexes"]:
+        subtitle_maps += ["-map", f"0:s:{idx}"]
     lang = config.get("lang")
     if lang and a_streams:
-        # Map only video, audio matching requested language (or untagged), and subtitles
+        # Map only video, audio matching requested language (or untagged), and selected subtitles.
         stream_tags = [(s.get("tags") or {}) for s in a_streams]
         matched_audio = [
             idx for idx, tags in enumerate(stream_tags)
@@ -3361,14 +3451,19 @@ def _build_ffmpeg_cmd(
             or (tags.get("language") or tags.get("LANGUAGE") or "").lower() in (lang.lower(), "und")
         ]
         if matched_audio:
-            cmd += ["-map", "0:v", "-map", "0:s?"]
+            cmd += ["-map", "0:v"]
+            cmd += subtitle_maps
             for idx in matched_audio:
                 cmd += ["-map", f"0:a:{idx}"]
             cmd += ["-ignore_unknown"]
         else:
-            cmd += ["-map", "0", "-ignore_unknown"]
+            cmd += ["-map", "0:v", "-map", "0:a?"]
+            cmd += subtitle_maps
+            cmd += ["-ignore_unknown"]
     else:
-        cmd += ["-map", "0", "-ignore_unknown"]
+        cmd += ["-map", "0:v", "-map", "0:a?"]
+        cmd += subtitle_maps
+        cmd += ["-ignore_unknown"]
     # Structured progress to stdout; suppress the normal stats line on stderr
     cmd += ["-progress", "pipe:1", "-nostats"]
     cmd += [output_path]
@@ -3448,6 +3543,7 @@ async def _run_encode_job(job_id: str) -> None:
             v_streams = [s for s in streams if s.get("codec_type") == "video"]
             a_streams = [s for s in streams if s.get("codec_type") == "audio"]
             s_streams = [s for s in streams if s.get("codec_type") == "subtitle"]
+            subtitle_selection = _select_subtitle_streams(s_streams)
             vst = v_streams[0] if v_streams else {}
             ast = a_streams[0] if a_streams else {}
             bps = vst.get("bits_per_raw_sample")
@@ -3486,6 +3582,10 @@ async def _run_encode_job(job_id: str) -> None:
                 "audio_codec": ast.get("codec_name", ""),
                 "audio_count": len(a_streams),
                 "sub_count":   len(s_streams),
+                "input_subtitle_count": subtitle_selection["input_subtitle_count"],
+                "kept_subtitle_count": subtitle_selection["kept_subtitle_count"],
+                "dropped_subtitle_count": subtitle_selection["dropped_subtitle_count"],
+                "kept_subtitle_summary": subtitle_selection["kept_subtitle_summary"],
             }
             _notify_encode(job_id)
         except Exception as e:
@@ -3522,7 +3622,8 @@ async def _run_encode_job(job_id: str) -> None:
         cmd, encoder = _build_ffmpeg_cmd(
             job.input_path, job.output_path, job.config, _hw_accel_info,
             bit_depth, is_hdr, cp, tc, cs, cr,
-            crop_filter=crop_filter, a_streams=a_streams, source_fps=source_fps,
+            crop_filter=crop_filter, a_streams=a_streams,
+            s_streams=s_streams, source_fps=source_fps,
         )
         job.encoder = encoder
         try:
