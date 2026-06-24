@@ -395,6 +395,39 @@
     </section>
 
     <section class="automation-panel" style="margin-top:14px">
+        <h2>Manual Live Review Encode Test</h2>
+        <p class="settings-help">Queues one real encode into the mapped MediaStatReview folder only. Originals are not replaced, deleted, moved, or refreshed in Radarr/Plex. Requires live_review_enabled=true, dry_run can remain true for normal automation, schedule open, mapping found, and preflight passed.</p>
+        <form class="settings-form" id="manual-live-review-form" style="margin-top:12px">
+            <div class="test-grid">
+                <div class="settings-field settings-wide">
+                    <label for="manual-live-review-path">File path</label>
+                    <input type="text" id="manual-live-review-path" placeholder="/media/movies/MovieExample/MovieExample.mkv" required>
+                </div>
+                <div class="settings-field">
+                    <label for="manual-live-review-source">Source</label>
+                    <select id="manual-live-review-source">
+                        <option value="radarr">radarr</option>
+                        <option value="sonarr">sonarr</option>
+                    </select>
+                </div>
+                <div class="settings-field">
+                    <label for="manual-live-review-profile">Profile</label>
+                    <input type="text" id="manual-live-review-profile" value="high_quality_hevc_qp18">
+                </div>
+                <div class="settings-field settings-wide">
+                    <label for="manual-live-review-token">Automation token</label>
+                    <input type="password" id="manual-live-review-token" autocomplete="current-password" placeholder="Required to queue one encode">
+                </div>
+            </div>
+            <div class="settings-actions">
+                <button type="submit" id="manual-live-review-run">Queue One Live Review Encode</button>
+                <p class="settings-status" id="manual-live-review-status"></p>
+            </div>
+        </form>
+        <div id="manual-live-review-result" class="test-result"></div>
+    </section>
+
+    <section class="automation-panel" style="margin-top:14px">
         <h2>Recent Automation History</h2>
         <div id="automation-history"></div>
     </section>
@@ -892,6 +925,74 @@ async function runAutomationDryRunTest(event) {
     }
 }
 
+function setManualLiveReviewStatus(message, kind = '') {
+    const el = document.getElementById('manual-live-review-status');
+    el.className = `settings-status ${kind}`;
+    el.textContent = message || '';
+}
+
+function isLiveReviewSuccess(payload) {
+    return boolValue(payload.queued) &&
+        !isBlank(payload.job_id) &&
+        payload.output_beside_original === false &&
+        payload.movie_library_sidecar_needed === false &&
+        payload.output_under_review_root === true &&
+        payload.review_preflight_ok === true;
+}
+
+function renderManualLiveReviewResult(payload, httpStatus, ok) {
+    const success = ok && isLiveReviewSuccess(payload);
+    const status = success ? 'safe' : (ok ? 'neutral' : 'blocked');
+    const title = success
+        ? 'Live review encode queued into the mapped MediaStatReview folder.'
+        : (ok ? 'Live review response returned. Review safety fields below.' : 'Live review request was rejected or failed.');
+    const rows = testSummaryRows(payload, httpStatus);
+    document.getElementById('manual-live-review-result').innerHTML = `
+        <div class="result-banner ${status}">${esc(title)}</div>
+        <dl class="automation-kv">${rows.map(([label, value]) =>
+            `<dt>${esc(label)}</dt><dd>${displayValue(value)}</dd>`
+        ).join('')}</dl>
+    `;
+}
+
+async function runManualLiveReviewTest(event) {
+    event.preventDefault();
+    const button = document.getElementById('manual-live-review-run');
+    const tokenInput = document.getElementById('manual-live-review-token');
+    const token = tokenInput.value;
+    const body = {
+        source: document.getElementById('manual-live-review-source').value,
+        path: document.getElementById('manual-live-review-path').value.trim(),
+        profile: document.getElementById('manual-live-review-profile').value.trim() || 'high_quality_hevc_qp18'
+    };
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['X-Automation-Token'] = token;
+
+    button.disabled = true;
+    setManualLiveReviewStatus('Queueing one live review encode...', '');
+    try {
+        const resp = await fetch(`${BASE_PATH}/automation/live-review-test`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify(body)
+        });
+        const responseBody = await resp.json().catch(() => ({}));
+        const payload = testPayloadFromBody(responseBody);
+        renderManualLiveReviewResult(payload, resp.status, resp.ok);
+        setManualLiveReviewStatus(
+            resp.ok ? 'Manual live review request complete' : 'Manual live review request returned an error response',
+            resp.ok ? 'ok' : 'error'
+        );
+        await loadAutomationStatus();
+    } catch (err) {
+        renderManualLiveReviewResult({ error: err.message || 'request failed' }, 'network', false);
+        setManualLiveReviewStatus(err.message || 'Manual live review request failed', 'error');
+    } finally {
+        tokenInput.value = '';
+        button.disabled = false;
+    }
+}
+
 function renderHistory(history) {
     const items = Array.isArray(history) ? history : [];
     if (!items.length) {
@@ -1077,6 +1178,7 @@ loadAutomationStatus().catch(err => {
 });
 document.getElementById('automation-settings-form').addEventListener('submit', saveAutomationSettings);
 document.getElementById('automation-test-form').addEventListener('submit', runAutomationDryRunTest);
+document.getElementById('manual-live-review-form').addEventListener('submit', runManualLiveReviewTest);
 document.getElementById('add-review-mapping').addEventListener('click', () => {
     document.getElementById('review-mapping-list').insertAdjacentHTML('beforeend', mappingRowHtml('', ''));
 });

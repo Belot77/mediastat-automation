@@ -338,6 +338,35 @@ MediaStat encode jobs into mapped MediaStatReview folders. This stage does not
 replace, delete, move, or rename originals, and it does not call Radarr, Sonarr,
 or Plex refresh APIs.
 
+## Manual Live Review Encode Test
+
+The Automation page includes a separate Manual Live Review Encode Test panel for
+one selected file. It calls:
+
+```text
+POST /automation/live-review-test
+```
+
+This is intentionally separate from `/automation/queue`. Normal Radarr/Sonarr
+import automation is still not automatically live: `dry_run: true` blocks normal
+queueing, `dry_run: false` alone is not enough, `live_review_enabled: false`
+blocks live queueing, schedule closure blocks live queueing, missing mappings
+block live queueing, and failed preflight blocks live queueing.
+
+The manual test endpoint requires `X-Automation-Token` and queues one real encode
+only when `live_review_enabled: true`, the automation schedule window is open,
+the input file is valid, a review output mapping matches, and review preflight
+passes. The queued output is the mapped MediaStatReview output path only.
+Original media files are not replaced, deleted, moved, renamed, or refreshed in
+Radarr, Sonarr, Plex, or other library tools.
+
+Expected response fields include `queued`, `dry_run`, `job_id`, `input_path`,
+`output_path`, `review_mapping_found`, `review_mapping_input_root`,
+`review_mapping_review_root`, `review_preflight_ok`,
+`output_under_review_root`, `output_beside_original`,
+`movie_library_sidecar_needed`, `write_probe_ok`, `queue_blocked_by`,
+`preview_status`, `schedule_currently_open`, and `schedule_reason`.
+
 ## Job preview
 
 Accepted dry-run automation requests include a job preview so the response,

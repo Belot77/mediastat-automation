@@ -4165,6 +4165,27 @@ def _automation_review_mappings() -> list[dict]:
     return _automation_mapping_entries(AUTOMATION_CONFIG.get("review_output_mappings"))
 
 
+def _automation_active_job_conflict(file_path: Path, output_path: Path | None) -> dict:
+    input_real = Path(os.path.realpath(file_path))
+    output_real = Path(os.path.realpath(output_path)) if output_path is not None else None
+    for job in _encode_jobs.values():
+        if job.status not in ("queued", "running"):
+            continue
+        job_input = Path(os.path.realpath(job.input_path))
+        job_output = Path(os.path.realpath(job.output_path))
+        if job_input == input_real:
+            return {
+                "duplicate_job_id": job.id,
+                "duplicate_job_reason": "input path already has a queued or running encode job",
+            }
+        if output_real is not None and job_output == output_real:
+            return {
+                "duplicate_job_id": job.id,
+                "duplicate_job_reason": "output path already has a queued or running encode job",
+            }
+    return {}
+
+
 def _automation_relative_to_input_root(file_path: Path, input_root: str) -> Path | None:
     root_path = Path(input_root)
     resolved_file = _automation_resolve_loose(file_path)
@@ -5727,6 +5748,316 @@ async def automation_queue(request: Request):
             event=event,
             profile=profile_name,
             post_action="keep",
+            input_path=str(file_path),
+            output_path=queued_output,
+        ),
+    )
+
+
+@app.post("/automation/live-review-test")
+async def automation_live_review_test(request: Request):
+    _remember_automation_request()
+    _automation_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        _automation_reject("invalid JSON body")
+    if not isinstance(body, dict):
+        _automation_reject("invalid JSON body")
+
+    source = str(body.get("source") or "radarr").strip().lower()
+    event = str(body.get("event") or "manual_live_review_test").strip().lower()
+    category = "manual_live_review_test"
+    input_path = str(body.get("path") or "").strip()
+    profile_name = str(
+        body.get("profile")
+        or AUTOMATION_CONFIG.get("default_profile")
+        or "high_quality_hevc_qp18"
+    ).strip()
+    post_action = "keep"
+    _remember_automation_request(
+        source=source, event=event, category=category, input_path=input_path,
+        profile=profile_name, post_action=post_action,
+    )
+
+    def reject_manual(
+        reason: str,
+        queue_blocked_by: str,
+        preview_status: str,
+        *,
+        status_code: int = 409,
+        decision: str = "rejected",
+        input_path_value: str | None = None,
+        output_path_value: str | None = "",
+        warnings: list[str] | None = None,
+        extra_context: dict | None = None,
+    ) -> None:
+        preview = _automation_job_preview(
+            would_queue=False,
+            queue_blocked_by=queue_blocked_by,
+            preview_status=preview_status,
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action=post_action,
+            input_path=input_path_value if input_path_value is not None else input_path,
+            output_path=output_path_value,
+        )
+        _automation_reject(
+            reason,
+            status_code=status_code,
+            decision=decision,
+            source=source,
+            event=event,
+            category=category,
+            profile=profile_name,
+            post_action=post_action,
+            input_path=input_path_value if input_path_value is not None else input_path,
+            output_path=output_path_value,
+            dry_run=False,
+            live_review_gate_reason=reason,
+            warnings=warnings or [],
+            preview=preview,
+            **(extra_context or {}),
+        )
+
+    if source not in ("radarr", "sonarr"):
+        reject_manual("source must be radarr or sonarr for manual live review test", "invalid_source", "blocked_invalid_source")
+
+    if not _automation_live_review_enabled():
+        reject_manual(
+            "live review encode gate is disabled",
+            "live_review_disabled",
+            "blocked_live_review_disabled",
+        )
+
+    profiles = AUTOMATION_CONFIG.get("profiles") or {}
+    profile_cfg = profiles.get(profile_name)
+    if not isinstance(profile_cfg, dict):
+        reject_manual("profile is unknown", "invalid_profile", "blocked_invalid_profile")
+    if not input_path:
+        reject_manual("path is missing", "path_missing", "blocked_path_missing")
+
+    file_path = Path(input_path).expanduser()
+    if not file_path.exists():
+        reject_manual("path does not exist", "path_missing", "blocked_path_missing", status_code=404)
+    if not _automation_path_allowed(file_path):
+        reject_manual("path is outside MediaStat allowed roots", "path_not_allowed", "blocked_path_not_allowed", status_code=403)
+    if file_path.is_dir():
+        reject_manual("directory paths are not supported by manual live review test", "path_not_file", "blocked_path_not_file")
+    if not file_path.is_file():
+        reject_manual("path is not a file", "path_not_file", "blocked_path_not_file")
+
+    schedule_preview = _automation_schedule_preview()
+    if (
+        schedule_preview.get("schedule_enabled") is not True
+        or schedule_preview.get("schedule_currently_open") is not True
+    ):
+        reject_manual(
+            str(schedule_preview.get("schedule_reason") or "automation schedule window is closed"),
+            "schedule_closed",
+            "blocked_schedule",
+            input_path_value=str(file_path),
+        )
+
+    try:
+        config = _make_encode_config(profile_cfg)
+    except (TypeError, ValueError):
+        reject_manual("profile config is invalid", "invalid_profile", "blocked_invalid_profile", input_path_value=str(file_path))
+    config.update({
+        "automation": True,
+        "automation_source": source,
+        "automation_event": event,
+        "automation_profile": profile_name,
+        "automation_post_action": "keep",
+        "automation_original_path": str(file_path),
+        "automation_category": category,
+        "automation_manual_live_review_test": True,
+        "automation_requested_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
+
+    output_plan = _automation_output_plan(file_path, config)
+    output_path = output_plan.get("output_path")
+    output_plan_context = {k: v for k, v in output_plan.items() if k != "output_path"}
+    output_path_text = str(output_path or "")
+    _remember_automation_request(
+        source=source, event=event, category=category, input_path=str(file_path),
+        output_path=output_path_text, profile=profile_name, post_action=post_action,
+    )
+
+    if not AUTOMATION_CONFIG.get("review_output_enabled", True):
+        reject_manual(
+            "review output is disabled",
+            "review_preflight_failed",
+            "blocked_review_preflight",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context=output_plan_context,
+        )
+    if output_plan.get("review_mapping_found") is False:
+        reason = str(output_plan.get("review_mapping_reason") or "no review output mapping matches input path")
+        reject_manual(
+            reason,
+            "review_mapping_missing",
+            "blocked_review_mapping",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context=output_plan_context,
+        )
+    if output_path is None:
+        reject_manual(
+            "no safe automation output path was planned",
+            "no_safe_output_path",
+            "blocked_no_safe_output_path",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context=output_plan_context,
+        )
+    if output_path.parent == file_path.parent:
+        reject_manual(
+            "live Radarr/Sonarr sidecar output is blocked in automation V1",
+            "arr_sidecar_output_blocked",
+            "blocked_arr_sidecar_output",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context=output_plan_context,
+        )
+
+    stability = await _automation_file_stability(file_path)
+    warnings: list[str] = []
+    if stability.get("stability_check_enabled") and stability.get("file_stable") is False:
+        reason = str(stability.get("stability_reason") or "file is not stable")
+        warnings.append(reason)
+        reject_manual(
+            "file is not stable",
+            "file_unstable",
+            "blocked_file_unstable",
+            decision="file_unstable",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            warnings=warnings,
+            extra_context=stability,
+        )
+
+    preflight = await asyncio.to_thread(_automation_review_output_preflight, file_path, output_path, output_plan)
+    preflight_reason = str(preflight.get("review_preflight_reason") or "")
+    if preflight.get("review_preflight_enabled") is not True:
+        reject_manual(
+            preflight_reason or "review output preflight disabled",
+            "review_preflight_failed",
+            "blocked_review_preflight",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    if preflight.get("review_root_exists") is not True:
+        reject_manual(
+            preflight_reason or "review output root does not exist",
+            "review_preflight_failed",
+            "blocked_review_preflight",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    if preflight.get("review_mapping_found") is False:
+        reject_manual(
+            str(preflight.get("review_mapping_reason") or preflight_reason or "no review output mapping matches input path"),
+            "review_mapping_missing",
+            "blocked_review_mapping",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    if preflight.get("output_beside_original") is True or preflight.get("movie_library_sidecar_needed") is True:
+        reject_manual(
+            preflight_reason or "planned output would be beside the original media file",
+            "arr_sidecar_output_blocked",
+            "blocked_arr_sidecar_output",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    if preflight.get("output_under_review_root") is not True:
+        reject_manual(
+            preflight_reason or "planned output is outside the review output root",
+            "no_safe_output_path",
+            "blocked_no_safe_output_path",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    if preflight.get("write_probe_ok") is not True:
+        reject_manual(
+            preflight_reason or "review output write probe failed",
+            "review_preflight_failed",
+            "blocked_review_preflight",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    if preflight.get("review_preflight_ok") is not True:
+        reject_manual(
+            preflight_reason or "review output preflight failed",
+            "review_preflight_failed",
+            "blocked_review_preflight",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+
+    duplicate = _automation_active_job_conflict(file_path, output_path)
+    if duplicate:
+        reject_manual(
+            str(duplicate.get("duplicate_job_reason") or "input or output already has a queued or running encode job"),
+            "duplicate_active_job",
+            "blocked_duplicate_active_job",
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight, **duplicate},
+        )
+
+    if not shutil.which("ffmpeg"):
+        reject_manual(
+            "ffmpeg not found in PATH",
+            "ffmpeg_missing",
+            "blocked_ffmpeg_missing",
+            status_code=503,
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+
+    job_id = _queue_file_encode(file_path, config, output_path=output_path)
+    if not job_id:
+        reject_manual(
+            "encode job could not be queued",
+            "queue_failed",
+            "blocked_queue_failed",
+            status_code=503,
+            input_path_value=str(file_path),
+            output_path_value=output_path_text,
+            extra_context={**stability, **preflight},
+        )
+    await _save_encode_job(_encode_jobs[job_id])
+    _enqueue_job(job_id)
+    queued_output = _encode_jobs[job_id].output_path
+    log.info(
+        "Automation manual live review accepted: source=%s event=%s profile=%s job=%s input=%s output=%s",
+        source, event, profile_name, job_id, file_path, queued_output,
+    )
+    return _automation_response(
+        queued=True, ignored=False, dry_run=False, job_id=job_id,
+        source=source, event=event, category=category, profile=profile_name,
+        post_action=post_action, input_path=str(file_path), output_path=queued_output,
+        warnings=warnings, stability=stability, preflight=preflight,
+        preview=_automation_job_preview(
+            would_queue=True,
+            queue_blocked_by="",
+            preview_status="queued",
+            source=source,
+            event=event,
+            profile=profile_name,
+            post_action=post_action,
             input_path=str(file_path),
             output_path=queued_output,
         ),
