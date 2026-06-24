@@ -137,6 +137,11 @@
             width: 100%; border-radius: 6px; background: #000;
             max-height: 70vh;
         }
+        .preview-error {
+            display: none; padding: 10px 12px; border-radius: 6px;
+            border: 1px solid #4a1f24; background: rgba(248,81,73,0.08);
+            color: var(--red); font-size: var(--fs-sm); overflow-wrap: anywhere;
+        }
         .preview-actions { display: flex; justify-content: flex-end; }
 
         .job-meta { font-size: var(--fs-xs); color: var(--muted); margin-bottom: 6px; }
@@ -313,6 +318,7 @@
     <div class="preview-box" onclick="event.stopPropagation()">
         <div class="preview-title" id="preview-title"></div>
         <video id="preview-video" controls preload="metadata"></video>
+        <div class="preview-error" id="preview-error"></div>
         <div class="preview-actions">
             <button class="job-action-btn" onclick="closePreview()">✕ Close</button>
         </div>
@@ -479,7 +485,7 @@ function buildCard(job) {
         const moveBtn = job.moved
             ? `<button class="job-action-btn moved-done" disabled title="Original replaced">↔ Moved</button>`
             : `<button class="job-action-btn move" id="move-${job.id}" onclick="moveJob('${job.id}')" title="Replace original with output">↔ Move</button>`;
-        const playBtn = `<button class="job-action-btn play" onclick="openPreview(${JSON.stringify(job.output_path)}, ${JSON.stringify(job.output_name)})" title="Preview encoded file">▶ Preview</button>`;
+        const playBtn = `<button class="job-action-btn play" data-output-path="${escHtml(job.output_path || '')}" data-output-name="${escHtml(job.output_name || '')}" onclick="openPreviewFromButton(this)" title="Preview encoded file">▶ Preview</button>`;
         action = playBtn
                + ` ` + moveBtn
                + `<button class="job-action-btn" onclick="dismissJob('${job.id}')" style="margin-left:4px">✕ Dismiss</button>`;
@@ -639,13 +645,37 @@ function escHtml(s) {
 }
 
 // ── Preview modal ─────────────────────────────────────────────────────────────
+function setPreviewError(message) {
+    const error = document.getElementById('preview-error');
+    if (!error) return;
+    error.textContent = message || '';
+    error.style.display = message ? 'block' : 'none';
+}
+
+function openPreviewFromButton(button) {
+    const data = button ? button.dataset : {};
+    openPreview(data.outputPath || '', data.outputName || '');
+}
+
 function openPreview(outputPath, outputName) {
     const overlay = document.getElementById('preview-overlay');
     const video   = document.getElementById('preview-video');
     const title   = document.getElementById('preview-title');
-    title.textContent = outputName || outputPath;
+    title.textContent = outputName || outputPath || 'Preview';
+    setPreviewError('');
+    video.pause();
+    video.removeAttribute('src');
+    video.load();
+    if (!outputPath) {
+        video.style.display = 'none';
+        setPreviewError('Preview is unavailable because this encode job has no output path.');
+        overlay.classList.add('open');
+        return;
+    }
+    video.style.display = '';
     video.src = BASE_PATH + '/stream?path=' + encodeURIComponent(outputPath);
     overlay.classList.add('open');
+    video.load();
 }
 
 function closePreview(event) {
@@ -653,8 +683,18 @@ function closePreview(event) {
     const overlay = document.getElementById('preview-overlay');
     const video   = document.getElementById('preview-video');
     overlay.classList.remove('open');
+    setPreviewError('');
+    video.style.display = '';
     video.pause();
-    video.src = '';
+    video.removeAttribute('src');
+    video.load();
+}
+
+const previewVideo = document.getElementById('preview-video');
+if (previewVideo) {
+    previewVideo.addEventListener('error', () => {
+        setPreviewError('Preview could not be loaded. The output file may be missing or unsupported by this browser.');
+    });
 }
 
 // ── Utility ───────────────────────────────────────────────────────────────────
