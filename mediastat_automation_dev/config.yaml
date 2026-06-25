@@ -1,6 +1,6 @@
 ---
 name: "MediaStat Automation Dev"
-version: "1.0.34-dev19"
+version: "1.0.34-dev20"
 slug: "mediastat_automation_dev"
 description: "Media browser, health checker and HandBrake transcoder for your library"
 url: "https://github.com/Belot77/mediastat-automation"

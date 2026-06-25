@@ -534,8 +534,9 @@ function buildCard(job) {
         const movieId = radarrRefresh.radarr_movie_id ? ` · movie ${radarrRefresh.radarr_movie_id}` : '';
         const source = radarrRefresh.radarr_movie_id_source ? ` · source ${radarrRefresh.radarr_movie_id_source}` : '';
         const mappedPath = radarrRefresh.radarr_mapped_path ? ` · mapped ${radarrRefresh.radarr_mapped_path}` : '';
+        const payload = radarrRefresh.radarr_command_payload_summary ? ` · ${radarrRefresh.radarr_command_payload_summary}` : '';
         const reason = radarrRefresh.radarr_refresh_reason ? ` · ${radarrRefresh.radarr_refresh_reason}` : '';
-        radarrRefreshHtml = `<div class="job-meta"><span>Radarr refresh after Move: ${escHtml(status + movieId + source + mappedPath + reason)}</span></div>`;
+        radarrRefreshHtml = `<div class="job-meta"><span>Radarr refresh after Move: ${escHtml(status + movieId + source + mappedPath + payload + reason)}</span></div>`;
     }
 
     // Progress bar

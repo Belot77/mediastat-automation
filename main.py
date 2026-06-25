@@ -4649,6 +4649,7 @@ def _radarr_move_result(
     movie_id: int | None = None,
     movie_id_source: str = "",
     mapped_path: str = "",
+    command_payload_summary: str = "",
 ) -> dict:
     return {
         "radarr_refresh_after_move_enabled": enabled,
@@ -4658,6 +4659,7 @@ def _radarr_move_result(
         "radarr_movie_id": movie_id,
         "radarr_movie_id_source": movie_id_source,
         "radarr_mapped_path": mapped_path,
+        "radarr_command_payload_summary": command_payload_summary,
     }
 
 
@@ -4792,37 +4794,43 @@ def _radarr_refresh_after_move(job: EncodeJob, moved_path: Path) -> dict:
         movie_id, reason, mapped_path, movie_id_source = _radarr_resolve_movie_id(base_url, api_key, moved_path)
         if movie_id is None:
             return _radarr_move_result(enabled=True, reason=reason, movie_id_source=movie_id_source, mapped_path=mapped_path)
+    command_payload_summary = f"RefreshMovie movieIds=[{movie_id}]"
 
     try:
-        _radarr_api_json(base_url, api_key, "POST", "/api/v3/command", {"name": "RefreshMovie", "movieId": movie_id})
+        _radarr_api_json(base_url, api_key, "POST", "/api/v3/command", {"name": "RefreshMovie", "movieIds": [movie_id]})
     except urllib.error.HTTPError as exc:
         return _radarr_move_result(
             enabled=True, attempted=True, ok=False,
             reason=f"Radarr refresh request failed with HTTP {exc.code}", movie_id=movie_id,
             movie_id_source=movie_id_source, mapped_path=mapped_path,
+            command_payload_summary=command_payload_summary,
         )
     except urllib.error.URLError:
         return _radarr_move_result(
             enabled=True, attempted=True, ok=False,
             reason="Radarr refresh request failed: connection error", movie_id=movie_id,
             movie_id_source=movie_id_source, mapped_path=mapped_path,
+            command_payload_summary=command_payload_summary,
         )
     except TimeoutError:
         return _radarr_move_result(
             enabled=True, attempted=True, ok=False,
             reason="Radarr refresh request failed: timeout", movie_id=movie_id,
             movie_id_source=movie_id_source, mapped_path=mapped_path,
+            command_payload_summary=command_payload_summary,
         )
     except Exception:
         return _radarr_move_result(
             enabled=True, attempted=True, ok=False,
             reason="Radarr refresh request failed", movie_id=movie_id,
             movie_id_source=movie_id_source, mapped_path=mapped_path,
+            command_payload_summary=command_payload_summary,
         )
     return _radarr_move_result(
         enabled=True, attempted=True, ok=True,
         reason="Radarr RefreshMovie command accepted", movie_id=movie_id,
         movie_id_source=movie_id_source, mapped_path=mapped_path,
+        command_payload_summary=command_payload_summary,
     )
 
 
