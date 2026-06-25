@@ -349,6 +349,12 @@
                     <label for="radarr-api-key">Radarr API key</label>
                     <input type="password" id="radarr-api-key" autocomplete="new-password" placeholder="Leave blank to keep current key">
                 </div>
+                <div class="settings-field settings-full">
+                    <label>Radarr path mappings</label>
+                    <p class="settings-help">Translate moved MediaStat paths to the paths Radarr sees. Use absolute container paths only. MediaStat will only run RefreshMovie after a unique movie match; it will not search, rename, download, delete, or refresh Plex.</p>
+                    <div class="mapping-list" id="radarr-path-mapping-list"></div>
+                    <button type="button" class="settings-secondary" id="add-radarr-path-mapping">Add Radarr Mapping</button>
+                </div>
                 <div class="settings-field">
                     <label for="automation-token">Automation token</label>
                     <input type="password" id="automation-token" autocomplete="current-password" placeholder="Required to save">
@@ -745,6 +751,21 @@ function mappingRowHtml(inputRoot = '', reviewRoot = '') {
     `;
 }
 
+function radarrMappingRowHtml(mediastatRoot = '', radarrRoot = '') {
+    return `
+        <div class="mapping-row radarr-mapping-row">
+            <label>
+                <span class="mapping-label">mediastat_root</span>
+                <input type="text" class="radarr-mediastat-root" value="${esc(mediastatRoot)}" placeholder="/media/movies">
+            </label>
+            <label>
+                <span class="mapping-label">radarr_root</span>
+                <input type="text" class="radarr-root" value="${esc(radarrRoot)}" placeholder="/movies">
+            </label>
+        </div>
+    `;
+}
+
 function renderReviewMappings(data) {
     const list = document.getElementById('review-mapping-list');
     const mappings = Array.isArray(data.review_output_mappings) ? data.review_output_mappings : [];
@@ -774,11 +795,29 @@ function renderReviewMappings(data) {
     list.innerHTML = rows;
 }
 
+function renderRadarrPathMappings(data) {
+    const list = document.getElementById('radarr-path-mapping-list');
+    const mappings = Array.isArray(data.radarr_path_mappings) ? data.radarr_path_mappings : [];
+    list.innerHTML = mappings.length
+        ? mappings.map(mapping => radarrMappingRowHtml(
+            mapping && mapping.mediastat_root ? String(mapping.mediastat_root) : '',
+            mapping && mapping.radarr_root ? String(mapping.radarr_root) : ''
+        )).join('')
+        : radarrMappingRowHtml('', '');
+}
+
 function collectReviewMappings() {
-    return Array.from(document.querySelectorAll('.mapping-row')).map(row => ({
+    return Array.from(document.querySelectorAll('#review-mapping-list .mapping-row')).map(row => ({
         input_root: row.querySelector('.mapping-input-root').value.trim(),
         review_root: row.querySelector('.mapping-review-root').value.trim()
     })).filter(mapping => mapping.input_root || mapping.review_root);
+}
+
+function collectRadarrPathMappings() {
+    return Array.from(document.querySelectorAll('#radarr-path-mapping-list .mapping-row')).map(row => ({
+        mediastat_root: row.querySelector('.radarr-mediastat-root').value.trim(),
+        radarr_root: row.querySelector('.radarr-root').value.trim()
+    })).filter(mapping => mapping.mediastat_root || mapping.radarr_root);
 }
 
 function updateScheduleForm(data) {
@@ -797,6 +836,7 @@ function updateScheduleForm(data) {
         ? 'Configured; leave blank to keep current key'
         : 'Optional Radarr API key';
     renderReviewMappings(data);
+    renderRadarrPathMappings(data);
 }
 
 async function saveAutomationSettings(event) {
@@ -815,7 +855,8 @@ async function saveAutomationSettings(event) {
         review_output_mappings: collectReviewMappings(),
         live_review_enabled: document.getElementById('live-review-enabled').checked,
         radarr_refresh_after_move_enabled: document.getElementById('radarr-refresh-after-move-enabled').checked,
-        radarr_url: document.getElementById('radarr-url').value.trim()
+        radarr_url: document.getElementById('radarr-url').value.trim(),
+        radarr_path_mappings: collectRadarrPathMappings()
     };
     const radarrApiKey = document.getElementById('radarr-api-key').value.trim();
     if (radarrApiKey) payload.radarr_api_key = radarrApiKey;
@@ -1113,6 +1154,7 @@ async function loadAutomationStatus() {
         ['default_post_action', esc(data.default_post_action)],
         ['radarr_refresh_after_move', esc(boolText(data.radarr_refresh_after_move_enabled))],
         ['radarr_url', esc(data.radarr_url)],
+        ['radarr_path_mappings', esc((data.radarr_path_mappings || []).map(mapping => `${mapping.mediastat_root} -> ${mapping.radarr_root}`).join(' / '))],
         ['radarr_api_key_configured', esc(boolText(data.radarr_api_key_configured))],
         ['token_configured', esc(boolText(data.token_configured))],
         ['enabled_sources', listValue(data.enabled_sources)]
@@ -1224,6 +1266,9 @@ document.getElementById('automation-test-form').addEventListener('submit', runAu
 document.getElementById('manual-live-review-form').addEventListener('submit', runManualLiveReviewTest);
 document.getElementById('add-review-mapping').addEventListener('click', () => {
     document.getElementById('review-mapping-list').insertAdjacentHTML('beforeend', mappingRowHtml('', ''));
+});
+document.getElementById('add-radarr-path-mapping').addEventListener('click', () => {
+    document.getElementById('radarr-path-mapping-list').insertAdjacentHTML('beforeend', radarrMappingRowHtml('', ''));
 });
 </script>
 </body>
